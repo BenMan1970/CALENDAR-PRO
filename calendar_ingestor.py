@@ -11,6 +11,7 @@ Producteur autonome de l'artefact canonique. Ne dépend PAS de Streamlit.
 Sorties (écriture atomique) :
     data/calendar.latest.json    artefact canonique v2 (schema_version 2.0.0)
     data/calendar.legacy.json    forme v1 corrigée, pont de migration
+    data/calendar.json           pont de compatibilité stricte v1 (app "merge")
     data/health.json             contrat de supervision minimal
     data/_state.json             circuit breaker + last-known-good
     data/raw/raw_<ts>.json       payload brut horodaté
@@ -43,6 +44,7 @@ from calendar_core import (
     build_payload,
     iso_z,
     sha256_hex,
+    to_bridge_payload,
     to_legacy_payload,
 )
 
@@ -362,6 +364,7 @@ def run_once(data_dir: Path, policy: SelectionPolicy, session: requests.Session,
     canonical = payload.model_dump(mode="json")
     atomic_write_json(data_dir / "calendar.latest.json", canonical)
     atomic_write_json(data_dir / "calendar.legacy.json", to_legacy_payload(payload, now))
+    atomic_write_json(data_dir / "calendar.json", to_bridge_payload(payload, now))
 
     short_hash = (payload.content_hash or "sha256:unknown").split(":")[-1][:12]
     atomic_write_json(
