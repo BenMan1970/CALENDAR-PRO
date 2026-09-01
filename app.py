@@ -8,7 +8,9 @@ Responsabilités :
   • relancer l'ingestion à intervalle contrôlé ;
   • afficher le dernier artefact validé, y compris en mode dégradé ;
   • recalculer les countdowns et fuseaux sans modifier le payload canonique ;
-  • exposer les exports canonical, legacy et health ;
+  • exposer les exports legacy et health (calendar.latest.json reste consulté
+    en direct par le dashboard, mais n'est plus proposé au téléchargement
+    depuis l'onglet Exports — cible confondue à tort avec calendar.json) ;
   • maintenir une séparation stricte entre politique machine et filtres UI.
 
 Important :
@@ -1242,15 +1244,7 @@ def render_exports(
         "Il correspond exactement à l’artefact validé et publié par l’ingestor."
     )
 
-    canonical = payload.model_dump(mode="json")
     legacy = to_legacy_payload(payload, reference)
-
-    canonical_bytes = json.dumps(
-        canonical,
-        indent=2,
-        ensure_ascii=False,
-        sort_keys=False,
-    ).encode("utf-8")
 
     legacy_bytes = json.dumps(
         legacy,
@@ -1266,30 +1260,20 @@ def render_exports(
         sort_keys=False,
     ).encode("utf-8")
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
 
     with col1:
-        st.download_button(
-            "⬇️ calendar.latest.json",
-            data=canonical_bytes,
-            file_name="calendar.latest.json",
-            mime="application/json",
-            use_container_width=True,
-            type="primary",
-        )
-        st.caption(f"{len(canonical_bytes) / 1024:.1f} KiB")
-
-    with col2:
         st.download_button(
             "⬇️ calendar.legacy.json",
             data=legacy_bytes,
             file_name="calendar.legacy.json",
             mime="application/json",
             use_container_width=True,
+            type="primary",
         )
         st.caption(f"{len(legacy_bytes) / 1024:.1f} KiB")
 
-    with col3:
+    with col2:
         st.download_button(
             "⬇️ health.json",
             data=health_bytes,
