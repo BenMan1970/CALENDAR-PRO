@@ -886,3 +886,50 @@ def to_legacy_payload(payload: CalendarPayload, now_utc: datetime) -> Dict[str, 
         "events_engine": rows,
         "summary_by_day": {k: summary[k] for k in sorted(summary)},
     }
+
+
+_LEGACY_TIME_PROXIMITY_LABELS: Tuple[str, ...] = tuple(p.value for p in TimeProximity)
+_LEGACY_SESSION_LABELS: Tuple[str, ...] = ("LONDON", "NEW YORK", "OVERLAP", "ASIAN", "OFF")
+
+
+def to_bridge_payload(payload: CalendarPayload, now_utc: datetime) -> Dict[str, Any]:
+    """
+    Pont de compatibilité stricte pour les consommateurs v1 historiques
+    (ex. application 'merge') qui attendent exactement la forme produite
+    par l'ancien app.py monolithique : metadata.filters_applied présent,
+    et 'actual' en placeholder '—' plutôt que null.
+
+    Ne modifie PAS to_legacy_payload() : calendar.legacy.json conserve ses
+    corrections v1.1.0 volontaires (actual=null explicite). Ce pont est une
+    dérivation supplémentaire, écrite séparément dans calendar.json, donc
+    aucune régression sur les artefacts existants.
+
+    Note : selection_policy.currencies est None (= aucun filtre devise actif
+    dans le pipeline v2). 'filters_applied.currencies' est donc reconstruit
+    à partir des devises réellement présentes dans les événements retenus,
+    et non recopié depuis une config figée qui n'existe plus côté ingestor.
+    """
+    bridge = to_legacy_payload(payload, now_utc)
+    rows = bridge["events"]  # meme liste que events_engine
+
+    for row in rows:
+        if row["actual"] is None:
+            row["actual"] = "\u2014"  # '—', comportement v1 historique
+
+    currencies_filter = (
+        sorted(payload.selection_policy.currencies)
+        if payload.selection_policy.currencies
+        else sorted({r["currency"] for r in rows})
+    )
+
+    meta = bridge["metadata"]
+    meta.pop("ui_filters_applied", None)
+    meta["filters_applied"] = {
+        "currencies": currencies_filter,
+        "sessions": list(_LEGACY_SESSION_LABELS),
+        "show_past": payload.selection_policy.window_past_hours > 0,
+        "time_proximity": list(_LEGACY_TIME_PROXIMITY_LABELS),
+    }
+
+    return bridge
+      
