@@ -105,7 +105,6 @@ ALL_CURRENCIES: Tuple[str, ...] = (
     "AUD",
     "NZD",
     "CHF",
-    "CNY",
 )
 
 ALL_IMPACTS: Tuple[Impact, ...] = (
@@ -173,10 +172,6 @@ ASSET_MAPPING: Dict[str, Tuple[str, ...]] = {
         "USD/CHF", "EUR/CHF", "GBP/CHF", "AUD/CHF",
         "NZD/CHF", "CAD/CHF", "CHF/JPY",
         "CH20",
-    ),
-    "CNY": (
-        "USD/CNY", "EUR/CNY",
-        "CN50", "HK50",
     ),
     "ALL": (),
 }
@@ -1264,9 +1259,9 @@ def render_exports(
 
     with col1:
         st.download_button(
-            "⬇️ calendar.legacy.json",
+            "⬇️ calendar.json",
             data=legacy_bytes,
-            file_name="calendar.legacy.json",
+            file_name="calendar.json",
             mime="application/json",
             use_container_width=True,
             type="primary",
