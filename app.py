@@ -27,6 +27,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from html import escape
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -35,11 +36,9 @@ import requests
 import streamlit as st
 
 from calendar_core import (
-    ActualStatus,
     CalendarEvent,
     CalendarPayload,
     Impact,
-    PairMappingStatus,
     QualityStatus,
     SelectionPolicy,
     Session,
@@ -563,86 +562,197 @@ def format_numeric(value: Any) -> str:
     return f"{number:.2f}"
 
 
-def impact_label(impact: Impact) -> str:
-    return {
-        Impact.HIGH: "🔴 HIGH",
-        Impact.MEDIUM: "🟠 MEDIUM",
-        Impact.LOW: "🟢 LOW",
-        Impact.HOLIDAY: "⚪ HOLIDAY",
-        Impact.UNKNOWN: "❔ UNKNOWN",
-    }.get(impact, impact.value)
-
-
-def proximity_label(proximity: TimeProximity) -> str:
-    return {
-        TimeProximity.IMMINENT: "🔴 IMMINENT",
-        TimeProximity.SOON: "🟠 SOON",
-        TimeProximity.LATER: "🔵 LATER",
-        TimeProximity.PAST: "⚪ PAST",
-    }[proximity]
-
-
-def quality_label(status: QualityStatus) -> str:
-    return {
-        QualityStatus.VALID: "✅ VALID",
-        QualityStatus.DEGRADED: "⚠️ DEGRADED",
-        QualityStatus.INVALID: "🚨 INVALID",
-    }.get(status, status.value)
-
-
 def render_event_card(
     event: CalendarEvent,
     show_extended_assets: bool,
 ) -> None:
     ctx = event.time_context
-    assets = get_affected_assets(
-        event,
-        extended=show_extended_assets,
+    assets = get_affected_assets(event, extended=show_extended_assets)
+
+    impact_text, impact_tone = IMPACT_META.get(
+        event.impact, (event.impact.value, "unknown")
+    )
+    prox_text, prox_tone = PROXIMITY_META[ctx.time_proximity]
+
+    chips = "".join(
+        f'<span class="bs-asset">{escape(asset)}</span>'
+        for asset in assets[:10]
+    )
+    if len(assets) > 10:
+        chips += f'<span class="bs-asset">+{len(assets) - 10}</span>'
+
+    group_line = ""
+    if event.release_group_id:
+        group_type = (
+            event.release_group_type.value
+            if event.release_group_type
+            else "GROUP"
+        )
+        group_line = (
+            f'<div class="bs-group">{escape(group_type)} · '
+            f"{escape(event.release_group_id)}</div>"
+        )
+
+    html_block(
+        f'<article class="bs-card bs-card--{impact_tone}">'
+        f'<div class="bs-card__head"><div>'
+        f'<h4 class="bs-card__title">{escape(event.name)}</h4>'
+        f'<div class="bs-card__meta">'
+        f'<span class="bs-badge bs-badge--{impact_tone}">{impact_text}</span>'
+        f'<span class="bs-chip">{escape(event.currency)}</span>'
+        f'<span class="bs-card__meta-txt">{escape(event.session.value)}</span>'
+        f"</div></div>"
+        f'<div class="bs-card__timing">'
+        f'<span class="bs-prox bs-prox--{prox_tone}">{prox_text}</span>'
+        f'<span class="bs-count">{escape(ctx.hours_until_display)}</span>'
+        f"</div></div>"
+        f'<div class="bs-card__time">'
+        f'<span class="bs-time">'
+        f"{event.scheduled_at_display.strftime('%H:%M')}</span>"
+        f'<span class="bs-tz">{escape(event.display_timezone)}</span>'
+        f'<span class="bs-date">· {escape(event.date_display)} · '
+        f"{escape(event.day_of_week)}</span></div>"
+        f'<div class="bs-kv">'
+        f'<div class="bs-kv__item"><span class="bs-kv__k">Forecast</span>'
+        f'<span class="bs-kv__v">{escape(format_numeric(event.forecast))}</span></div>'
+        f'<div class="bs-kv__item"><span class="bs-kv__k">Previous</span>'
+        f'<span class="bs-kv__v">{escape(format_numeric(event.previous))}</span></div>'
+        f'<div class="bs-kv__item"><span class="bs-kv__k">Actual</span>'
+        f'<span class="bs-kv__v">{escape(format_numeric(event.actual))}</span></div>'
+        f'<div class="bs-kv__item"><span class="bs-kv__k">Statut</span>'
+        f'<span class="bs-kv__v">{escape(event.actual_status.value)}</span></div>'
+        f"</div>"
+        f'<div class="bs-assets">{chips}</div>'
+        f"{group_line}"
+        f"</article>"
+    )
+
+
+# =============================================================================
+# DESIGN SYSTEM
+# =============================================================================
+
+IMPACT_META: Dict[Impact, Tuple[str, str]] = {
+    Impact.HIGH: ("HIGH", "high"),
+    Impact.MEDIUM: ("MEDIUM", "medium"),
+    Impact.LOW: ("LOW", "low"),
+    Impact.HOLIDAY: ("HOLIDAY", "holiday"),
+    Impact.UNKNOWN: ("UNKNOWN", "unknown"),
+}
+
+PROXIMITY_META: Dict[TimeProximity, Tuple[str, str]] = {
+    TimeProximity.IMMINENT: ("IMMINENT", "imminent"),
+    TimeProximity.SOON: ("SOON", "soon"),
+    TimeProximity.LATER: ("LATER", "later"),
+    TimeProximity.PAST: ("PAST", "past"),
+}
+
+QUALITY_META: Dict[QualityStatus, Tuple[str, str]] = {
+    QualityStatus.VALID: ("VALID", "ok"),
+    QualityStatus.DEGRADED: ("DEGRADED", "warn"),
+    QualityStatus.INVALID: ("INVALID", "crit"),
+}
+
+
+def html_block(markup: str) -> None:
+    st.markdown(markup, unsafe_allow_html=True)
+
+
+def render_stat_grid(cards: Sequence[Tuple[str, str, str, str]]) -> None:
+    """cards = ((label, value, subtitle, tone), ...) ; tone ∈ ok|warn|crit|info|''"""
+    items = "".join(
+        f'<div class="bs-stat bs-stat--{tone}">'
+        f'<span class="bs-stat__label">{escape(label)}</span>'
+        f'<span class="bs-stat__value">{escape(value)}</span>'
+        f'<span class="bs-stat__sub">{escape(sub) if sub else "&nbsp;"}</span>'
+        f"</div>"
+        for label, value, sub, tone in cards
+    )
+    html_block(f'<div class="bs-stats">{items}</div>')
+
+
+def render_section_title(title: str, tone: str, count: int) -> None:
+    html_block(
+        f'<div class="bs-section">'
+        f'<span class="bs-section__rule bs-section__rule--{tone}"></span>'
+        f"{escape(title)}"
+        f'<span class="bs-section__count">{count}</span>'
+        f"</div>"
+    )
+
+
+def build_legacy_bytes(
+    payload: CalendarPayload,
+    reference: datetime,
+) -> bytes:
+    return json.dumps(
+        to_legacy_payload(payload, reference),
+        indent=2,
+        ensure_ascii=False,
+        sort_keys=False,
+    ).encode("utf-8")
+
+
+def render_command_bar(
+    payload: CalendarPayload,
+    reference: datetime,
+    visible_count: int,
+) -> None:
+    """
+    Barre de commande persistante en haut de page.
+    L'export canonique n'est plus enfoui dans un onglet.
+    """
+    legacy_bytes = build_legacy_bytes(payload, reference)
+    quality_text, _tone = QUALITY_META.get(
+        payload.quality.status,
+        (payload.quality.status.value, ""),
     )
 
     with st.container(border=True):
-        title_col, timing_col = st.columns([3, 1])
+        html_block('<div id="bs-cmdbar"></div>')
 
-        with title_col:
-            st.markdown(f"#### {event.name}")
-            st.caption(
-                f"{impact_label(event.impact)} · "
-                f"{event.session.value} · {event.currency}"
-            )
-
-        with timing_col:
-            st.markdown(
-                f"**{proximity_label(ctx.time_proximity)}**"
-            )
-            st.caption(ctx.hours_until_display)
-
-        st.write(
-            f"🕐 **{event.scheduled_at_display.strftime('%H:%M')}** "
-            f"({event.display_timezone}) · "
-            f"📅 {event.date_display}"
+        brand_col, meta_col, action_col = st.columns(
+            [4, 3, 2],
+            vertical_alignment="center",
         )
 
-        st.caption(
-            f"Forecast: {format_numeric(event.forecast)} · "
-            f"Previous: {format_numeric(event.previous)} · "
-            f"Actual: {format_numeric(event.actual)} "
-            f"({event.actual_status.value})"
-        )
-
-        assets_display = ", ".join(assets[:8])
-        if len(assets) > 8:
-            assets_display += f" +{len(assets) - 8}"
-
-        st.caption(f"🎯 {assets_display}")
-
-        if event.release_group_id:
-            group_type = (
-                event.release_group_type.value
-                if event.release_group_type
-                else "GROUP"
+        with brand_col:
+            html_block(
+                '<div class="bs-brand">'
+                '<span class="bs-brand__mark"></span>'
+                "<span>"
+                '<span class="bs-brand__title">BLUESTAR Economic Calendar</span>'
+                f'<span class="bs-brand__sub">schema {escape(payload.schema_version)}'
+                f" · {escape(quality_text)}"
+                f" · {visible_count}/{len(payload.events)} événements</span>"
+                "</span></div>"
             )
-            st.caption(
-                f"📦 {group_type} · {event.release_group_id}"
+
+        with meta_col:
+            html_block(
+                '<div class="bs-brand__sub" style="text-align:right">'
+                f"généré {escape(iso_z(payload.generated_at_utc))}<br>"
+                f"hash {escape((payload.content_hash or '—').split(':')[-1][:16])}"
+                "</div>"
+            )
+
+        with action_col:
+            st.download_button(
+                "Télécharger calendar.json",
+                data=legacy_bytes,
+                file_name="calendar.json",
+                mime="application/json",
+                use_container_width=True,
+                type="primary",
+                key="dl_calendar_topbar",
+                help=(
+                    "Artefact legacy v1 dérivé du payload canonique. "
+                    "Aucun filtre UI appliqué."
+                ),
+            )
+            html_block(
+                '<div class="bs-brand__sub" style="text-align:center">'
+                f"{len(legacy_bytes) / 1024:.1f} KiB</div>"
             )
 
 
@@ -650,12 +760,19 @@ def render_event_card(
 # SIDEBAR
 # =============================================================================
 
+def side_label(text: str) -> None:
+    st.sidebar.markdown(
+        f'<div class="bs-side-label">{escape(text)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def render_sidebar() -> ViewFilters:
     st.sidebar.title("🔷 BLUESTAR Calendar")
     st.sidebar.caption("Canonical data · Live computed view")
     st.sidebar.divider()
 
-    st.sidebar.subheader("📊 Niveau d’impact")
+    side_label("Niveau d'impact")
 
     impact_options = (
         ("HIGH ⭐⭐⭐", Impact.HIGH, True),
@@ -674,7 +791,7 @@ def render_sidebar() -> ViewFilters:
         ):
             selected_impacts.append(impact)
 
-    st.sidebar.subheader("💱 Devises")
+    side_label("Devises")
 
     selected_currencies: List[str] = []
     columns = st.sidebar.columns(3)
@@ -688,7 +805,7 @@ def render_sidebar() -> ViewFilters:
             ):
                 selected_currencies.append(currency)
 
-    st.sidebar.subheader("🌐 Sessions")
+    side_label("Sessions")
 
     session_labels = {
         Session.OVERLAP_LONDON_NY: "Overlap LDN-NY",
@@ -709,7 +826,7 @@ def render_sidebar() -> ViewFilters:
         ):
             selected_sessions.append(session)
 
-    st.sidebar.subheader("⏱️ Proximité")
+    side_label("Proximité")
 
     proximity_labels = {
         TimeProximity.IMMINENT: "🔴 IMMINENT (< 6h)",
@@ -744,7 +861,7 @@ def render_sidebar() -> ViewFilters:
     )
 
     st.sidebar.divider()
-    st.sidebar.subheader("⚙️ Options")
+    side_label("Options")
 
     include_global = st.sidebar.checkbox(
         "🌍 Inclure les événements globaux",
@@ -765,9 +882,9 @@ def render_sidebar() -> ViewFilters:
         st.session_state.refresh_request = 0
 
     if st.sidebar.button(
-        "🔄 Forcer une ingestion",
+        "Forcer une ingestion",
         use_container_width=True,
-        type="primary",
+        type="secondary",
     ):
         st.session_state.refresh_request += 1
 
@@ -810,8 +927,6 @@ def render_header(
     state: Optional[Dict[str, Any]],
     reference: datetime,
 ) -> None:
-    st.markdown("## 🔷 BLUESTAR Economic Calendar")
-
     source_age = max(
         0,
         int(
@@ -820,76 +935,60 @@ def render_header(
             ).total_seconds()
         ),
     )
-
     dynamically_stale = (
         source_age > payload.selection_policy.max_source_age_seconds
     )
 
-    st.caption(
-        f"Schema v{payload.schema_version} · "
-        f"Généré {iso_z(payload.generated_at_utc)} · "
-        f"Source fetch {iso_z(payload.source.fetched_at_utc)}"
+    quality_text, quality_tone = QUALITY_META.get(
+        payload.quality.status,
+        (payload.quality.status.value, "info"),
     )
 
-    col1, col2, col3, col4, col5 = st.columns(5)
+    circuit_state = (
+        state.get("circuit_state", "UNKNOWN") if state else "UNKNOWN"
+    )
+    circuit_tone = {
+        "CLOSED": "ok",
+        "HALF_OPEN": "warn",
+        "OPEN": "crit",
+    }.get(circuit_state, "")
 
-    with col1:
-        st.metric(
+    render_stat_grid((
+        (
             "Qualité",
-            quality_label(payload.quality.status),
-            f"Score {payload.quality.data_quality_score:.3f}",
-        )
-
-    with col2:
-        st.metric(
+            quality_text,
+            f"score {payload.quality.data_quality_score:.3f}",
+            quality_tone,
+        ),
+        (
             "Événements",
-            len(payload.events),
+            str(len(payload.events)),
             f"{payload.quality.rejected_event_count} rejeté(s)",
-        )
-
-    with col3:
-        if dynamically_stale:
-            source_text = "🔴 STALE"
-        else:
-            source_text = "🟢 FRAIS"
-
-        st.metric(
+            "info",
+        ),
+        (
             "Source",
-            source_text,
-            f"Âge {source_age}s",
-        )
-
-    with col4:
-        circuit_state = (
-            state.get("circuit_state", "UNKNOWN")
-            if state
-            else "UNKNOWN"
-        )
-
-        circuit_icon = {
-            "CLOSED": "🟢",
-            "HALF_OPEN": "🟡",
-            "OPEN": "🔴",
-        }.get(circuit_state, "⚪")
-
-        st.metric(
+            "STALE" if dynamically_stale else "FRAIS",
+            f"âge {source_age}s",
+            "crit" if dynamically_stale else "ok",
+        ),
+        (
             "Circuit",
-            f"{circuit_icon} {circuit_state}",
-        )
-
-    with col5:
-        st.metric(
+            circuit_state,
+            f"fetch {iso_z(payload.source.fetched_at_utc)}",
+            circuit_tone,
+        ),
+        (
             "Actual",
-            (
-                "✅ Supporté"
-                if payload.source.supports_actual
-                else "⚠️ Non supporté"
-            ),
-        )
+            "SUPPORTÉ" if payload.source.supports_actual else "ABSENT",
+            payload.numeric_parser_version,
+            "ok" if payload.source.supports_actual else "warn",
+        ),
+    ))
 
     if dynamically_stale:
         st.error(
-            "La source est actuellement plus ancienne que le seuil autorisé. "
+            "La source est plus ancienne que le seuil autorisé. "
             "Le dernier artefact validé reste visible, mais il doit être "
             "considéré comme stale."
         )
@@ -897,20 +996,16 @@ def render_header(
     runtime = runtime_control()
     if runtime.last_runtime_error:
         st.error(
-            f"Erreur runtime de l’orchestrateur : "
-            f"{runtime.last_runtime_error}"
+            f"Erreur runtime de l’orchestrateur : {runtime.last_runtime_error}"
         )
 
     warnings = list(payload.quality.warnings)
-
     if health and health.get("last_error"):
-        warnings.append(
-            f"INGESTOR_LAST_ERROR: {health['last_error']}"
-        )
+        warnings.append(f"INGESTOR_LAST_ERROR: {health['last_error']}")
 
     if warnings:
         with st.expander(
-            f"⚠️ Avertissements ({len(warnings)})",
+            f"Avertissements ({len(warnings)})",
             expanded=dynamically_stale,
         ):
             for warning in dict.fromkeys(warnings):
@@ -918,7 +1013,7 @@ def render_header(
 
     if payload.quality.rejections:
         with st.expander(
-            f"🗑️ Rejets ({payload.quality.rejected_event_count})"
+            f"Rejets ({payload.quality.rejected_event_count})"
         ):
             for rejection in payload.quality.rejections:
                 st.code(rejection, language=None)
@@ -941,56 +1036,30 @@ def render_trading_desk(
         return
 
     sections = (
-        (
-            TimeProximity.IMMINENT,
-            "🔴 Événements imminents",
-            False,
-        ),
-        (
-            TimeProximity.SOON,
-            "🟠 Prochainement",
-            False,
-        ),
-        (
-            TimeProximity.LATER,
-            "🔵 À venir",
-            True,
-        ),
-        (
-            TimeProximity.PAST,
-            "⚪ Passés",
-            True,
-        ),
+        (TimeProximity.IMMINENT, "Événements imminents", "imminent", False),
+        (TimeProximity.SOON, "Prochainement", "soon", False),
+        (TimeProximity.LATER, "À venir", "later", True),
+        (TimeProximity.PAST, "Passés", "past", True),
     )
 
-    for proximity, title, collapsed in sections:
+    for proximity, title, tone, collapsed in sections:
         subset = [
             event
             for event in events
             if event.time_context.time_proximity is proximity
         ]
-
         if not subset:
             continue
 
-        st.markdown(f"### {title}")
+        render_section_title(title, tone, len(subset))
 
         if collapsed:
-            with st.expander(
-                f"Afficher {len(subset)} événement(s)",
-                expanded=False,
-            ):
+            with st.expander(f"Afficher {len(subset)} événement(s)", expanded=False):
                 for event in subset:
-                    render_event_card(
-                        event,
-                        filters.show_assets_extended,
-                    )
+                    render_event_card(event, filters.show_assets_extended)
         else:
             for event in subset:
-                render_event_card(
-                    event,
-                    filters.show_assets_extended,
-                )
+                render_event_card(event, filters.show_assets_extended)
 
 
 def render_detailed_view(
@@ -1232,51 +1301,44 @@ def render_exports(
     health: Optional[Dict[str, Any]],
     reference: datetime,
 ) -> None:
-    st.subheader("📦 Exports machine")
+    render_section_title("Exports machine", "later", 2)
 
-    st.info(
-        "Le téléchargement canonique n’applique aucun filtre UI. "
-        "Il correspond exactement à l’artefact validé et publié par l’ingestor."
+    st.caption(
+        "L’export principal est disponible en permanence dans la barre "
+        "supérieure. Les téléchargements n’appliquent aucun filtre UI et "
+        "correspondent exactement à l’artefact validé par l’ingestor."
     )
 
-    legacy = to_legacy_payload(payload, reference)
-
-    legacy_bytes = json.dumps(
-        legacy,
-        indent=2,
-        ensure_ascii=False,
-        sort_keys=False,
-    ).encode("utf-8")
-
+    legacy_bytes = build_legacy_bytes(payload, reference)
     health_bytes = json.dumps(
-        health or {},
-        indent=2,
-        ensure_ascii=False,
-        sort_keys=False,
+        health or {}, indent=2, ensure_ascii=False, sort_keys=False
     ).encode("utf-8")
 
     col1, col2 = st.columns(2)
 
     with col1:
         st.download_button(
-            "⬇️ calendar.json",
+            "calendar.json (copie)",
             data=legacy_bytes,
             file_name="calendar.json",
             mime="application/json",
             use_container_width=True,
-            type="primary",
+            type="secondary",
+            key="dl_calendar_exports",
         )
-        st.caption(f"{len(legacy_bytes) / 1024:.1f} KiB")
+        st.caption(f"{len(legacy_bytes) / 1024:.1f} KiB · legacy v1")
 
     with col2:
         st.download_button(
-            "⬇️ health.json",
+            "health.json",
             data=health_bytes,
             file_name="health.json",
             mime="application/json",
             use_container_width=True,
+            type="secondary",
+            key="dl_health_exports",
         )
-        st.caption(f"{len(health_bytes) / 1024:.1f} KiB")
+        st.caption(f"{len(health_bytes) / 1024:.1f} KiB · supervision")
 
     with st.expander("Aperçu du contrat canonique"):
         st.json({
@@ -1369,16 +1431,22 @@ def render_live_application(filters: ViewFilters) -> None:
 
     reference = now_utc()
 
+    events = prepare_view_events(
+        payload=payload,
+        filters=filters,
+        reference=reference,
+    )
+
+    render_command_bar(
+        payload=payload,
+        reference=reference,
+        visible_count=len(events),
+    )
+
     render_header(
         payload=payload,
         health=health,
         state=state,
-        reference=reference,
-    )
-
-    events = prepare_view_events(
-        payload=payload,
-        filters=filters,
         reference=reference,
     )
 
@@ -1444,31 +1512,304 @@ def apply_theme() -> None:
     st.markdown(
         """
         <style>
-        .stApp {
-            background-color: #0e0e1a;
-            color: #e0e0e0;
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+        :root {
+            --bs-bg:        #0B0D12;
+            --bs-surface:   #12151C;
+            --bs-surface-2: #171B24;
+            --bs-surface-3: #1D222D;
+            --bs-line:      #232936;
+            --bs-line-soft: #1B202A;
+            --bs-text:      #E7EAF0;
+            --bs-muted:     #8B94A7;
+            --bs-faint:     #5C6579;
+            --bs-red:       #E5484D;
+            --bs-red-hi:    #F2555A;
+            --bs-amber:     #F5A524;
+            --bs-green:     #3DD68C;
+            --bs-blue:      #5B8DEF;
+            --bs-radius:    12px;
+            --bs-mono:      'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
         }
 
+        /* ---------- Base ---------- */
+        html, body, .stApp, [class*="css"] {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            -webkit-font-smoothing: antialiased;
+            font-feature-settings: "cv02","cv03","cv04","ss01";
+        }
+        .stApp { background: var(--bs-bg); color: var(--bs-text); }
+        [data-testid="stAppViewContainer"] { background: var(--bs-bg); }
+        [data-testid="stHeader"], [data-testid="stDecoration"] { background: transparent; }
+        [data-testid="stToolbar"] { right: 8px; }
+        .block-container { padding-top: 2.2rem; padding-bottom: 4rem; max-width: 1480px; }
+
+        h1, h2, h3, h4, h5 {
+            font-weight: 600 !important;
+            letter-spacing: -0.021em !important;
+            color: var(--bs-text) !important;
+        }
+        p, li, span, div { font-size: 0.9rem; }
+        [data-testid="stCaptionContainer"], .stCaption, small {
+            color: var(--bs-muted) !important;
+            font-size: 0.78rem !important;
+            letter-spacing: 0.005em;
+        }
+        hr, [data-testid="stDivider"] { border-color: var(--bs-line-soft) !important; }
+        a { color: var(--bs-blue); text-decoration: none; }
+
+        /* ---------- Barre de commande sticky ---------- */
+        [data-testid="stVerticalBlockBorderWrapper"]:has(> div > div > div > #bs-cmdbar) {
+            position: sticky; top: 0; z-index: 999;
+            background: rgba(11,13,18,0.82);
+            backdrop-filter: saturate(140%) blur(14px);
+            -webkit-backdrop-filter: saturate(140%) blur(14px);
+            border: 1px solid var(--bs-line);
+            border-radius: var(--bs-radius);
+            padding: 14px 18px 10px 18px;
+            margin-bottom: 22px;
+            box-shadow: 0 10px 30px -18px rgba(0,0,0,0.9);
+        }
+        #bs-cmdbar { height: 0; overflow: hidden; }
+
+        .bs-brand { display: flex; align-items: center; gap: 11px; }
+        .bs-brand__mark {
+            width: 11px; height: 11px; border-radius: 3px;
+            background: linear-gradient(135deg, #6FA8FF, #2E5BD6);
+            box-shadow: 0 0 0 3px rgba(91,141,239,0.14);
+            transform: rotate(45deg);
+        }
+        .bs-brand__title {
+            font-size: 1.02rem; font-weight: 650;
+            letter-spacing: -0.02em; color: var(--bs-text);
+        }
+        .bs-brand__sub {
+            font-family: var(--bs-mono); font-size: 0.7rem;
+            color: var(--bs-faint); letter-spacing: 0.02em;
+            margin-top: 3px; font-variant-numeric: tabular-nums;
+        }
+
+        /* ---------- Boutons ---------- */
+        .stDownloadButton > button, .stButton > button {
+            border-radius: 9px !important;
+            font-size: 0.82rem !important;
+            font-weight: 560 !important;
+            letter-spacing: 0.005em;
+            min-height: 40px;
+            transition: transform .12s ease, filter .12s ease, background .12s ease;
+        }
+        /* Export canonique : rouge, réservé à cette action */
+        [data-testid="stDownloadButton"] button[kind="primary"],
+        [data-testid="stDownloadButton"] button[data-testid="baseButton-primary"] {
+            background: linear-gradient(180deg, var(--bs-red-hi) 0%, #D22E34 100%) !important;
+            border: 1px solid rgba(255,255,255,0.10) !important;
+            color: #FFFFFF !important;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.16),
+                        0 8px 22px -10px rgba(229,72,77,0.75) !important;
+        }
+        [data-testid="stDownloadButton"] button[kind="primary"]:hover {
+            filter: brightness(1.07); transform: translateY(-1px);
+        }
+        [data-testid="stDownloadButton"] button[kind="primary"]:active { transform: translateY(0); }
+        /* Actions neutres : ghost */
+        [data-testid="stDownloadButton"] button[kind="secondary"],
+        .stButton button[kind="secondary"] {
+            background: var(--bs-surface-2) !important;
+            border: 1px solid var(--bs-line) !important;
+            color: var(--bs-muted) !important;
+        }
+        [data-testid="stDownloadButton"] button[kind="secondary"]:hover,
+        .stButton button[kind="secondary"]:hover {
+            border-color: #313847 !important; color: var(--bs-text) !important;
+        }
+
+        /* ---------- Sidebar ---------- */
         [data-testid="stSidebar"] {
-            background-color: #17172a;
+            background: #0E1117;
+            border-right: 1px solid var(--bs-line-soft);
+        }
+        [data-testid="stSidebar"] .block-container { padding-top: 1.4rem; }
+        .bs-side-label {
+            font-size: 0.66rem; font-weight: 620;
+            letter-spacing: 0.14em; text-transform: uppercase;
+            color: var(--bs-faint); margin: 20px 0 6px 0;
+        }
+        [data-testid="stSidebar"] [data-testid="stCheckbox"] label p { font-size: 0.8rem !important; }
+        [data-testid="stSidebar"] hr { margin: 14px 0 !important; }
+
+        /* ---------- Grille de statuts ---------- */
+        .bs-stats {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+            gap: 10px; margin: 4px 0 18px 0;
+        }
+        .bs-stat {
+            position: relative; overflow: hidden;
+            background: var(--bs-surface); border: 1px solid var(--bs-line);
+            border-radius: var(--bs-radius); padding: 13px 15px 12px 15px;
+        }
+        .bs-stat::before {
+            content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+            background: var(--bs-faint);
+        }
+        .bs-stat--ok::before    { background: var(--bs-green); }
+        .bs-stat--warn::before  { background: var(--bs-amber); }
+        .bs-stat--crit::before  { background: var(--bs-red); }
+        .bs-stat--info::before  { background: var(--bs-blue); }
+        .bs-stat__label {
+            display: block; font-size: 0.66rem; font-weight: 600;
+            letter-spacing: 0.13em; text-transform: uppercase; color: var(--bs-faint);
+        }
+        .bs-stat__value {
+            display: block; margin-top: 7px;
+            font-size: 1.22rem; font-weight: 600; letter-spacing: -0.02em;
+            color: var(--bs-text); font-variant-numeric: tabular-nums;
+        }
+        .bs-stat__sub {
+            display: block; margin-top: 3px;
+            font-family: var(--bs-mono); font-size: 0.7rem; color: var(--bs-muted);
+            font-variant-numeric: tabular-nums;
         }
 
-        [data-testid="stMetric"] {
-            background-color: #18182b;
-            border: 1px solid #2c2c45;
-            border-radius: 10px;
-            padding: 12px;
+        /* ---------- Badges & chips ---------- */
+        .bs-badge, .bs-chip, .bs-prox {
+            display: inline-flex; align-items: center;
+            border-radius: 999px; font-size: 0.66rem; font-weight: 620;
+            letter-spacing: 0.08em; text-transform: uppercase;
+            padding: 3px 9px; border: 1px solid transparent; white-space: nowrap;
+        }
+        .bs-badge--high    { color: #FF9A9E; background: rgba(229,72,77,0.11);  border-color: rgba(229,72,77,0.28); }
+        .bs-badge--medium  { color: #F8CB7B; background: rgba(245,165,36,0.10);  border-color: rgba(245,165,36,0.26); }
+        .bs-badge--low     { color: #8DE3B6; background: rgba(61,214,140,0.09);  border-color: rgba(61,214,140,0.24); }
+        .bs-badge--holiday { color: #A9B2C4; background: rgba(139,148,167,0.10); border-color: rgba(139,148,167,0.24); }
+        .bs-badge--unknown { color: var(--bs-faint); background: rgba(92,101,121,0.10); border-color: rgba(92,101,121,0.22); }
+        .bs-prox--imminent { color: #FF9A9E; background: rgba(229,72,77,0.13); }
+        .bs-prox--soon     { color: #F8CB7B; background: rgba(245,165,36,0.12); }
+        .bs-prox--later    { color: #A9C4FF; background: rgba(91,141,239,0.12); }
+        .bs-prox--past     { color: var(--bs-faint); background: rgba(92,101,121,0.10); }
+        .bs-chip {
+            font-family: var(--bs-mono); text-transform: none; letter-spacing: 0.01em;
+            color: var(--bs-muted); background: var(--bs-surface-3); border-color: var(--bs-line);
         }
 
+        /* ---------- Carte événement ---------- */
+        .bs-card {
+            position: relative; background: var(--bs-surface);
+            border: 1px solid var(--bs-line); border-radius: var(--bs-radius);
+            padding: 15px 17px; margin-bottom: 9px;
+            transition: border-color .14s ease, background .14s ease;
+        }
+        .bs-card:hover { border-color: #2C3444; background: var(--bs-surface-2); }
+        .bs-card::before {
+            content: ""; position: absolute; left: 0; top: 12px; bottom: 12px;
+            width: 2px; border-radius: 2px; background: var(--bs-faint);
+        }
+        .bs-card--high::before    { background: var(--bs-red); }
+        .bs-card--medium::before  { background: var(--bs-amber); }
+        .bs-card--low::before     { background: var(--bs-green); }
+        .bs-card--holiday::before { background: #4A5261; }
+        .bs-card__head { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; }
+        .bs-card__title {
+            font-size: 0.97rem; font-weight: 600; letter-spacing: -0.014em;
+            color: var(--bs-text); margin: 0 0 8px 0; line-height: 1.3;
+        }
+        .bs-card__meta { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+        .bs-card__meta-txt { font-family: var(--bs-mono); font-size: 0.7rem; color: var(--bs-faint); }
+        .bs-card__timing { text-align: right; flex-shrink: 0; }
+        .bs-count {
+            display: block; margin-top: 6px; font-family: var(--bs-mono);
+            font-size: 0.76rem; color: var(--bs-muted); font-variant-numeric: tabular-nums;
+        }
+        .bs-card__time {
+            display: flex; align-items: baseline; gap: 8px;
+            margin: 12px 0 10px 0; padding-top: 11px; border-top: 1px solid var(--bs-line-soft);
+        }
+        .bs-time {
+            font-family: var(--bs-mono); font-size: 1.06rem; font-weight: 500;
+            color: var(--bs-text); font-variant-numeric: tabular-nums; letter-spacing: -0.01em;
+        }
+        .bs-tz, .bs-date { font-family: var(--bs-mono); font-size: 0.71rem; color: var(--bs-faint); }
+        .bs-kv { display: flex; gap: 22px; flex-wrap: wrap; margin-bottom: 10px; }
+        .bs-kv__item { display: flex; flex-direction: column; gap: 2px; }
+        .bs-kv__k {
+            font-size: 0.63rem; font-weight: 600; letter-spacing: 0.12em;
+            text-transform: uppercase; color: var(--bs-faint);
+        }
+        .bs-kv__v {
+            font-family: var(--bs-mono); font-size: 0.84rem; color: var(--bs-text);
+            font-variant-numeric: tabular-nums;
+        }
+        .bs-assets { display: flex; gap: 5px; flex-wrap: wrap; }
+        .bs-asset {
+            font-family: var(--bs-mono); font-size: 0.66rem; color: var(--bs-muted);
+            background: rgba(255,255,255,0.028); border: 1px solid var(--bs-line-soft);
+            border-radius: 5px; padding: 2px 6px;
+        }
+        .bs-group {
+            margin-top: 10px; font-family: var(--bs-mono);
+            font-size: 0.66rem; color: var(--bs-faint); letter-spacing: 0.02em;
+        }
+
+        /* ---------- Titres de section ---------- */
+        .bs-section {
+            display: flex; align-items: center; gap: 10px;
+            margin: 26px 0 12px 0; font-size: 0.7rem; font-weight: 650;
+            letter-spacing: 0.16em; text-transform: uppercase; color: var(--bs-muted);
+        }
+        .bs-section__rule { width: 22px; height: 2px; border-radius: 2px; background: var(--bs-faint); }
+        .bs-section__rule--imminent { background: var(--bs-red); }
+        .bs-section__rule--soon     { background: var(--bs-amber); }
+        .bs-section__rule--later    { background: var(--bs-blue); }
+        .bs-section__rule--past     { background: #3A4150; }
+        .bs-section__count {
+            font-family: var(--bs-mono); font-size: 0.68rem; letter-spacing: 0;
+            color: var(--bs-faint); background: var(--bs-surface-2);
+            border: 1px solid var(--bs-line); border-radius: 999px; padding: 1px 7px;
+        }
+
+        /* ---------- Onglets ---------- */
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 2px; background: var(--bs-surface); padding: 4px;
+            border: 1px solid var(--bs-line); border-radius: 10px;
+        }
+        .stTabs [data-baseweb="tab"] {
+            height: 34px; padding: 0 15px; border-radius: 7px;
+            background: transparent; color: var(--bs-muted);
+            font-size: 0.8rem; font-weight: 540; letter-spacing: 0.01em;
+        }
+        .stTabs [data-baseweb="tab"]:hover { color: var(--bs-text); background: rgba(255,255,255,0.03); }
+        .stTabs [aria-selected="true"] {
+            background: var(--bs-surface-3) !important; color: var(--bs-text) !important;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.05);
+        }
+        .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] { display: none; }
+
+        /* ---------- Conteneurs, expanders, données ---------- */
         [data-testid="stVerticalBlockBorderWrapper"] {
-            background-color: #151526;
-            border-color: #30304a;
+            background: transparent; border-color: var(--bs-line);
         }
-
-        .stDownloadButton > button,
-        .stButton > button {
-            border-radius: 8px;
+        [data-testid="stExpander"] {
+            background: var(--bs-surface); border: 1px solid var(--bs-line);
+            border-radius: 10px; overflow: hidden;
         }
+        [data-testid="stExpander"] summary { font-size: 0.82rem; font-weight: 540; }
+        [data-testid="stExpander"] summary:hover { color: var(--bs-text); }
+        [data-testid="stDataFrame"] {
+            border: 1px solid var(--bs-line); border-radius: 10px; overflow: hidden;
+        }
+        [data-testid="stDataFrame"] * { font-size: 0.78rem !important; }
+        .stJson, [data-testid="stJson"] {
+            background: var(--bs-surface) !important; border: 1px solid var(--bs-line);
+            border-radius: 10px; padding: 10px 12px; font-family: var(--bs-mono) !important;
+            font-size: 0.75rem !important;
+        }
+        code, pre, [data-testid="stCode"] { font-family: var(--bs-mono) !important; font-size: 0.75rem !important; }
+        [data-testid="stAlert"] { border-radius: 10px; border: 1px solid var(--bs-line); font-size: 0.82rem; }
+        [data-testid="stProgress"] > div > div > div > div { background: var(--bs-blue); }
+        ::-webkit-scrollbar { width: 9px; height: 9px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #262C39; border-radius: 6px; }
+        ::-webkit-scrollbar-thumb:hover { background: #313847; }
         </style>
         """,
         unsafe_allow_html=True,
