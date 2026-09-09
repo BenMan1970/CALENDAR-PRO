@@ -36,7 +36,7 @@ from pydantic import (
 # ─────────────────────────────────────────────────────────────────────────────
 # VERSIONS DE CONTRAT — toute rupture doit incrémenter la majeure
 # ─────────────────────────────────────────────────────────────────────────────
-SCHEMA_VERSION = "2.0.0"
+SCHEMA_VERSION = "2.1.0"  # 2.1.0 : ajout additif de CoverageInfo (aucune rupture v2.0.0)
 PAIR_MAPPING_METHOD = "static_currency_membership_v1"
 SESSION_POLICY_VERSION = "exchange_local_dst_aware_v1"
 NUMERIC_PARSER_VERSION = "ff_numeric_v1"
@@ -292,8 +292,13 @@ def fmt_until(hours: float) -> str:
 class SelectionPolicy(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    policy_version: str = "1.0.0"
-    impact_levels: Tuple[Impact, ...] = (Impact.HIGH,)
+    policy_version: str = "1.1.0"
+    # HIGH seul sous-couvre structurellement AUD/CAD/CHF/JPY/NZD : la source tague
+    # bien plus souvent HIGH les publications USD/EUR/GBP (CPI, GDP, rate decisions)
+    # que l'équivalent sur devises mineures (retail sales, trade balance, PMI...),
+    # pourtant tout aussi market-moving. HIGH+MEDIUM réduit ce biais sans changer
+    # la sémantique de la policy (LOW reste exclu par défaut).
+    impact_levels: Tuple[Impact, ...] = (Impact.HIGH, Impact.MEDIUM)
     currencies: Optional[Tuple[str, ...]] = None      # None = toutes
     include_global_events: bool = True
     window_past_hours: float = 72.0
@@ -443,6 +448,32 @@ class QualityInfo(BaseModel):
     rejections: Tuple[str, ...] = ()
 
 
+class CoverageInfo(BaseModel):
+    """
+    Sépare deux causes bien distinctes d'absence de devise dans l'artefact final,
+    pour que tout consommateur aval (rapport desk inclus) cesse de les confondre :
+
+      - currencies_excluded_by_policy : la source contenait des événements pour
+        cette devise sur la fenêtre temporelle, mais à un niveau d'impact (ou hors
+        filtre devise) non retenu par la policy active. Artefact de configuration,
+        PAS une information de marché. Ne doit déclencher aucune alerte de risque.
+
+      - currencies_no_data_in_source : la source ne contenait aucun événement pour
+        cette devise sur la fenêtre temporelle, quel que soit le niveau d'impact.
+        Calendrier réellement creux pour cette devise sur cette période — un statut
+        neutre à afficher tel quel, sans dramatisation.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    window_start_utc: str
+    window_end_utc: str
+    currencies_scope: Tuple[str, ...]
+    currencies_covered: Tuple[str, ...]
+    currencies_excluded_by_policy: Tuple[str, ...]
+    currencies_no_data_in_source: Tuple[str, ...]
+
+
 class CalendarPayload(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -453,6 +484,7 @@ class CalendarPayload(BaseModel):
     source: SourceInfo
     quality: QualityInfo
     selection_policy: SelectionPolicy
+    coverage: CoverageInfo
     session_policy_version: str = SESSION_POLICY_VERSION
     numeric_parser_version: str = NUMERIC_PARSER_VERSION
     events: Tuple[CalendarEvent, ...]
@@ -640,6 +672,39 @@ def _normalize_row(
     }, None
 
 
+def _coverage_diagnostics(
+    rows: List[Dict[str, Any]],
+    selected: List[Dict[str, Any]],
+    policy: SelectionPolicy,
+    lo: datetime,
+    hi: datetime,
+) -> CoverageInfo:
+    in_window = [r for r in rows if not r["is_global"] and lo <= r["scheduled_at_utc"] <= hi]
+
+    scope: Tuple[str, ...] = policy.currencies if policy.currencies is not None else KNOWN_CURRENCIES
+    raw_currencies_in_window = {r["currency"] for r in in_window}
+    covered = {r["currency"] for r in selected if not r["is_global"]}
+
+    excluded_by_policy: List[str] = []
+    no_data_in_source: List[str] = []
+    for ccy in scope:
+        if ccy in covered:
+            continue
+        if ccy in raw_currencies_in_window:
+            excluded_by_policy.append(ccy)
+        else:
+            no_data_in_source.append(ccy)
+
+    return CoverageInfo(
+        window_start_utc=iso_z(lo),
+        window_end_utc=iso_z(hi),
+        currencies_scope=tuple(sorted(scope)),
+        currencies_covered=tuple(sorted(covered)),
+        currencies_excluded_by_policy=tuple(sorted(excluded_by_policy)),
+        currencies_no_data_in_source=tuple(sorted(no_data_in_source)),
+    )
+
+
 def build_payload(
     raw_list: Any,
     *,
@@ -684,6 +749,8 @@ def build_payload(
         if not (lo <= row["scheduled_at_utc"] <= hi):
             continue
         selected.append(row)
+
+    coverage = _coverage_diagnostics(rows, selected, policy, lo, hi)
 
     seen: Dict[str, Dict[str, Any]] = {}
     duplicates = 0
@@ -766,6 +833,7 @@ def build_payload(
         source=source,
         quality=quality,
         selection_policy=policy,
+        coverage=coverage,
         events=tuple(events),
     )
     return payload.model_copy(update={"content_hash": canonical_content_hash(payload)})
@@ -775,7 +843,7 @@ def build_payload(
 # HASH DE CONTENU — insensible aux champs volatils
 # ─────────────────────────────────────────────────────────────────────────────
 _VOLATILE_EVENT_FIELDS = ("time_context",)
-_VOLATILE_ROOT_FIELDS = ("generated_at_utc", "content_hash", "source", "quality")
+_VOLATILE_ROOT_FIELDS = ("generated_at_utc", "content_hash", "source", "quality", "coverage")
 
 
 def canonical_content_hash(payload: CalendarPayload) -> str:
@@ -801,6 +869,34 @@ def refresh_time_contexts(
         e.with_time_context(compute_time_context(e, now_utc, payload.selection_policy))
         for e in payload.events
     )
+
+
+def render_coverage_note(coverage: CoverageInfo, impact_levels: Tuple[Impact, ...]) -> str:
+    """
+    Formulation neutre, destinée à un rendu client/desk. Principes :
+      - jamais de vocabulaire de risque ("fail-closed", "non écarté", "cap
+        prudentiel") pour un simple constat de périmètre de données ;
+      - la distinction policy vs source réelle est explicite mais factuelle ;
+      - couverture complète -> une ligne courte, pas de mise en avant.
+    """
+    levels = "+".join(lvl.value for lvl in impact_levels)
+
+    if not coverage.currencies_excluded_by_policy and not coverage.currencies_no_data_in_source:
+        return f"Couverture calendrier complète ({levels}) sur la fenêtre analysée."
+
+    parts = [f"Couverture calendrier ({levels}) : {', '.join(coverage.currencies_covered) or '—'}."]
+
+    if coverage.currencies_excluded_by_policy:
+        parts.append(
+            "Hors périmètre de sélection actif (données disponibles, non retenues) : "
+            f"{', '.join(coverage.currencies_excluded_by_policy)}."
+        )
+    if coverage.currencies_no_data_in_source:
+        parts.append(
+            "Aucune publication programmée sur la fenêtre pour : "
+            f"{', '.join(coverage.currencies_no_data_in_source)}."
+        )
+    return " ".join(parts)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -875,12 +971,29 @@ def to_legacy_payload(payload: CalendarPayload, now_utc: datetime) -> Dict[str, 
             "is_stale": payload.quality.is_stale,
             "source_age_seconds": payload.quality.source_age_seconds,
             "warnings": list(payload.quality.warnings),
+            "engine_events_count": len(rows),
+            # DEPRECATED — nom historiquement trompeur (= len(rows) quel que soit le
+            # policy réel, pas seulement HIGH). Conservé pour rétro-compatibilité
+            # aval ; utiliser engine_events_count + impact_levels_included ci-dessous.
             "total_high_impact": len(rows),
             "upcoming_count": sum(1 for r in rows if r["is_upcoming"]),
             "imminent_count": sum(1 for r in rows if r["time_proximity"] == "IMMINENT"),
-            "engine_events_count": len(rows),
             "summary_by_day_basis": "display_timezone",
             "ui_filters_applied": None,
+            # --- Périmètre & couverture : de quoi éviter à l'aval de confondre
+            #     "filtré par policy" et "aucune donnée réelle". ---
+            "impact_levels_included": [lvl.value for lvl in payload.selection_policy.impact_levels],
+            "currencies_filter": (
+                list(payload.selection_policy.currencies)
+                if payload.selection_policy.currencies is not None else "ALL"
+            ),
+            "coverage_window_start_utc": payload.coverage.window_start_utc,
+            "coverage_window_end_utc": payload.coverage.window_end_utc,
+            "currencies_scope": list(payload.coverage.currencies_scope),
+            "currencies_covered": list(payload.coverage.currencies_covered),
+            "currencies_excluded_by_policy": list(payload.coverage.currencies_excluded_by_policy),
+            "currencies_no_data_in_source": list(payload.coverage.currencies_no_data_in_source),
+            "coverage_note": render_coverage_note(payload.coverage, payload.selection_policy.impact_levels),
         },
         "events": rows,
         "events_engine": rows,
