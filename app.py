@@ -192,7 +192,8 @@ ENERGY: Tuple[str, ...] = ("WTI", "BRENT")
 # =============================================================================
 
 def parse_machine_impacts() -> Tuple[Impact, ...]:
-    raw = os.getenv("BLUESTAR_MACHINE_IMPACTS", "HIGH")
+    # HIGH seul sous-couvre AUD/CAD/CHF/JPY/NZD (voir calendar_core.SelectionPolicy).
+    raw = os.getenv("BLUESTAR_MACHINE_IMPACTS", "HIGH,MEDIUM")
     selected: List[Impact] = []
 
     for token in raw.split(","):
