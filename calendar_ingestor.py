@@ -411,7 +411,7 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--data-dir", type=Path, default=DATA_DIR)
     parser.add_argument("--display-tz", default=os.getenv("BLUESTAR_DISPLAY_TZ",
                                                           "Africa/Casablanca"))
-    parser.add_argument("--impact", nargs="*", default=["HIGH"],
+    parser.add_argument("--impact", nargs="*", default=["HIGH", "MEDIUM"],
                         help="niveaux retenus (HIGH MEDIUM LOW HOLIDAY)")
     parser.add_argument("--log-level", default=os.getenv("BLUESTAR_LOG_LEVEL", "INFO"))
     args = parser.parse_args(argv)
