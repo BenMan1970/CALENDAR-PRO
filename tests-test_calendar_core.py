@@ -1,4 +1,10 @@
-"""Suite de non-régression. CI bloquante : aucun déploiement si un test échoue."""
+"""Suite de non-régression. CI bloquante : aucun déploiement si un test échoue.
+
+NOM : ce fichier s'appelait `tests-test_calendar_core.py` — un pattern que
+pytest ne collecte PAS (ni `test_*.py`, ni `*_test.py`) : la « CI bloquante »
+revendiquée collectait silencieusement 0 test (audit calendrier 2026-09-11).
+Renommé ; ajouter ce dépôt à la racine de collecte de la CI.
+"""
 
 from __future__ import annotations
 
@@ -159,9 +165,12 @@ def test_placeholders_map_to_absent_never_to_em_dash():
 
 # ── Sélection & politique ────────────────────────────────────────────────────
 def test_only_policy_impact_levels_are_retained():
+    """Policy 1.1.0+ : HIGH+MEDIUM retenus, LOW/Holiday exclus par défaut.
+    (JOLTS Medium était l'ancienne victime de l'assertion HIGH-only.)"""
     payload = build()
-    assert {e.impact for e in payload.events} == {Impact.HIGH}
-    assert all("JOLTS" not in e.name for e in payload.events)
+    assert {e.impact for e in payload.events} == {Impact.HIGH, Impact.MEDIUM}
+    assert any("JOLTS" in e.name for e in payload.events)
+    assert all("Bank Holiday" not in e.name for e in payload.events)
 
 
 def test_holiday_impact_is_modelled_not_crashing():
@@ -174,7 +183,9 @@ def test_holiday_impact_is_modelled_not_crashing():
 def test_events_outside_window_are_excluded():
     policy = SelectionPolicy(window_past_hours=1, window_future_hours=6)
     payload = build(policy=policy)
-    assert [e.name for e in payload.events] == ["G20 Meetings", "ISM Manufacturing PMI"]
+    # JOLTS (Medium) est retenu depuis policy 1.1.0 — il partage la minute d'ISM.
+    assert [e.name for e in payload.events] == [
+        "ISM Manufacturing PMI", "JOLTS Job Openings", "G20 Meetings"]
 
 
 # ── Événements globaux ───────────────────────────────────────────────────────
@@ -314,7 +325,9 @@ def test_malformed_rows_are_rejected_individually_with_context():
                                 "date": "not-a-date", "impact": "High"}])
     assert payload.quality.rejected_event_count == 3
     assert any("Bad date" in r for r in payload.quality.rejections)
-    assert len(payload.events) == 5
+    # 7 retenus = 8 fixtures − Bank Holiday (impact hors policy) ; JOLTS Medium
+    # est compté depuis policy 1.1.0 (l'ancienne valeur 5 datait de HIGH-only).
+    assert len(payload.events) == 7
 
 
 def test_unknown_impact_vocabulary_raises_warning_not_exception():
@@ -377,3 +390,77 @@ def test_legacy_summary_is_indexed_on_display_dates():
     display_dates = {e["date_display"] for e in legacy["events"]}
     assert set(legacy["summary_by_day"]) == display_dates
     assert legacy["metadata"]["summary_by_day_basis"] == "display_timezone"
+
+
+# ── HARNESS-CAL : verrous du contrat legacy (audit calendrier 2026-09-11) ───
+def test_legacy_filters_applied_is_the_claimable_coverage():
+    """F-3 : le ENGINE lit `filters_applied.currencies` (et IGNORE currencies_covered).
+    La liste publiée doit être exactement ce que le flux revendique :
+    couvertes ∪ sans-publication, JAMAIS les devises exclues par la policy."""
+    legacy = to_legacy_payload(build(), NOW)
+    meta = legacy["metadata"]
+    assert meta["ui_filters_applied"] is None            # pureté humaine verrouillée
+    fa = meta["filters_applied"]
+    assert fa["basis"] == "machine_policy"
+    claimable = set(meta["currencies_covered"]) | set(meta["currencies_no_data_in_source"])
+    assert set(fa["currencies"]) == claimable
+    assert not (set(fa["currencies"]) & set(meta["currencies_excluded_by_policy"]))
+    ev_ccys = {e["currency"] for e in legacy["events"]} - {"ALL"}  # ALL = sentinel global
+    assert ev_ccys <= claimable                          # aucun événement hors couverture revendiquée
+
+
+def test_legacy_impact_casing_is_uniform():
+    """F-4 : metadata et événements parlaient deux casses du même vocabulaire."""
+    legacy = to_legacy_payload(build(), NOW)
+    assert set(legacy["metadata"]["impact_levels_included"]) == {"high", "medium"}
+    assert set(legacy["metadata"]["filters_applied"]["impact_levels"]) == {"high", "medium"}
+    for row in legacy["events"]:
+        assert row["impact"] == row["impact"].lower()
+
+
+def test_legacy_publishes_real_data_coverage_bounds():
+    """F-2 : les bornes POLICY ne doivent plus être la seule fenêtre visible
+    de l'aval — les bornes RÉELLES de données sont désormais exportées."""
+    legacy = to_legacy_payload(build(), NOW)
+    meta = legacy["metadata"]
+    times = [e["datetime_utc"] for e in legacy["events"]]
+    assert meta["data_coverage_start_utc"] == min(times)
+    assert meta["data_coverage_end_utc"] == max(times)
+    assert meta["data_coverage_horizon_h"] == pytest.approx(
+        (datetime.fromisoformat(max(times).replace("Z", "+00:00"))
+         - datetime.fromisoformat(meta["generated_at_utc"].replace("Z", "+00:00"))
+         ).total_seconds() / 3600.0, abs=0.02)
+
+
+def test_coverage_shorter_than_soon_horizon_is_warned_and_degrades():
+    """Régime « jeudi après-midi » : la source se tarit avant soon_hours (48 h)."""
+    payload = build(raw=[dict(RAW[0])])               # seul ISM : fin ~3,9 h devant NOW
+    assert any(w.startswith("COVERAGE_SHORTER_THAN_HORIZON") for w in payload.quality.warnings)
+    assert payload.quality.status is QualityStatus.DEGRADED
+
+
+def test_expired_last_known_good_is_invalid_not_recycled():
+    """F-2 : un LKG au-delà du plafond d'âge dur doit INVALIDER le publish
+    (avant ce champ, le plancher de score 0,40 le laissait republiable à vie)."""
+    old_lkg = make_source(from_last_known_good=True,
+                          fetched_at_utc=NOW - timedelta(hours=49))
+    payload = build(source=old_lkg)
+    assert any(w.startswith("LAST_KNOWN_GOOD_EXPIRED") for w in payload.quality.warnings)
+    assert payload.quality.status is QualityStatus.INVALID
+
+
+def test_fresh_last_known_good_stays_degradable_only():
+    lkg = make_source(from_last_known_good=True, fetched_at_utc=NOW - timedelta(hours=2))
+    payload = build(source=lkg)
+    assert not any(w.startswith("LAST_KNOWN_GOOD_EXPIRED") for w in payload.quality.warnings)
+    assert payload.quality.status is QualityStatus.DEGRADED
+
+
+def test_high_impact_count_is_no_longer_the_row_count():
+    """total_high_impact (deprecated) comptait HIGH+MEDIUM ; le nouveau champ
+    doit compter les vrais HIGH."""
+    legacy = to_legacy_payload(build(), NOW)
+    meta = legacy["metadata"]
+    assert meta["total_high_impact"] == len(legacy["events"])          # deprecated conservé
+    assert meta["high_impact_count"] == sum(1 for e in legacy["events"] if e["impact"] == "high")
+    assert meta["high_impact_count"] < meta["total_high_impact"]
