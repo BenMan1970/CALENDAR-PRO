@@ -49,7 +49,10 @@ from calendar_core import (
     refresh_time_contexts,
     to_legacy_payload,
 )
-from calendar_ingestor import build_session, run_once
+from calendar_ingestor import build_session, run_once, _anchor_data_dir
+
+# H3 (audit 2026-09-11) : le verrou inter-processus vit dans run_once — que
+# l'ingestion parte d'ici ou d'un cron, le même chemin sérialise les deux.
 
 
 # =============================================================================
@@ -59,7 +62,9 @@ from calendar_ingestor import build_session, run_once
 UTC = timezone.utc
 LOG = logging.getLogger("bluestar.streamlit")
 
-DATA_DIR = Path(os.getenv("BLUESTAR_DATA_DIR", "data")).resolve()
+# H2 : ancré sur le dossier d'installation (plus sur le cwd) — sinon deux cwd
+# = deux jeux d'artefacts parallèles silencieux entre cron et Streamlit.
+DATA_DIR = _anchor_data_dir(os.getenv("BLUESTAR_DATA_DIR", "data"))
 
 CANONICAL_PATH = DATA_DIR / "calendar.latest.json"
 LEGACY_PATH = DATA_DIR / "calendar.legacy.json"
@@ -104,6 +109,8 @@ ALL_CURRENCIES: Tuple[str, ...] = (
     "AUD",
     "NZD",
     "CHF",
+    "CNY",   # H5 : le cœur le gère (KNOWN_CURRENCIES + EXTRA_PAIRS) — son
+             # absence des filtres UI rendait les événements CNY invisibles.
 )
 
 ALL_IMPACTS: Tuple[Impact, ...] = (
@@ -171,6 +178,12 @@ ASSET_MAPPING: Dict[str, Tuple[str, ...]] = {
         "USD/CHF", "EUR/CHF", "GBP/CHF", "AUD/CHF",
         "NZD/CHF", "CAD/CHF", "CHF/JPY",
         "CH20",
+    ),
+    # H5 : miroir exact de calendar_core.EXTRA_PAIRS["CNY"] (+ CN50, déjà
+    # présent dans INDICES mais jusqu'ici inatteignable faute de devise).
+    "CNY": (
+        "USD/CNY", "EUR/CNY",
+        "CN50",
     ),
     "ALL": (),
 }
