@@ -9,7 +9,7 @@ Producteur autonome de l'artefact canonique. Ne dépend PAS de Streamlit.
     python calendar_ingestor.py --once --data-dir /srv/bluestar/data
 
 Sorties (écriture atomique) :
-    data/calendar.latest.json    artefact canonique v2 (schema_version 2.0.0)
+    data/calendar.latest.json    artefact canonique v2 (SCHEMA_VERSION, cf. calendar_core)
     data/calendar.legacy.json    forme v1 corrigée, pont de migration
     data/calendar.json           alias identique à calendar.legacy.json (nom attendu par l'app merge)
     data/health.json             contrat de supervision minimal
@@ -52,6 +52,17 @@ LOG = logging.getLogger("bluestar.ingestor")
 
 SOURCE_URL = os.getenv(
     "BLUESTAR_SOURCE_URL", "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+)
+# HARNESS-CAL (audit calendrier 2026-09-11, F-1) : le flux « this week » ne
+# peut pas satisfaire un horizon de 168 h dès jeudi (données qui s'arrêtent à
+# dimanche). Le flux « next week » est publié par Fair Economy en fin de
+# semaine : un 404 en milieu de semaine est la condition NORMALE de la source,
+# ni un incident, ni un signal à crier à chaque cycle. On le fetch en BONUS
+# fusionné ; son échec ne compte PAS dans le circuit breaker (qui protège le
+# flux primaire, lui). BLUESTAR_SOURCE_URL_NEXT="" désactive le bonus.
+SOURCE_URL_NEXT = os.getenv(
+    "BLUESTAR_SOURCE_URL_NEXT",
+    SOURCE_URL.replace("thisweek", "nextweek") if "thisweek" in SOURCE_URL else "",
 )
 SOURCE_PROVIDER = "Forex Factory / Fair Economy weekly public feed"
 USER_AGENT = os.getenv("BLUESTAR_USER_AGENT", "BluestarCalendarIngestor/2.0 (+ops@bluestar)")
@@ -285,21 +296,43 @@ def run_once(data_dir: Path, policy: SelectionPolicy, session: requests.Session,
 
     raw_list: Any = None
     meta: Dict[str, Any] = {}
+    feed_status: Dict[str, str] = {}
     from_lkg = False
     error: Optional[str] = None
 
     if not state.allow_request(now):
         error = "CIRCUIT_OPEN"
+        feed_status["thisweek"] = "circuit_open"
         LOG.warning("circuit breaker OPEN - skipping remote fetch")
     else:
         try:
             raw_list, meta = fetch_source(session, SOURCE_URL)
+            feed_status["thisweek"] = "ok"
             state.record_success(now)
             state.etag = meta.get("etag")
             state.last_modified = meta.get("last_modified")
+            if SOURCE_URL_NEXT:
+                try:
+                    extra_rows, extra_meta = fetch_source(session, SOURCE_URL_NEXT)
+                    if isinstance(extra_rows, list):
+                        raw_list = list(raw_list) + extra_rows
+                        feed_status["nextweek"] = "ok"
+                    else:
+                        feed_status["nextweek"] = "schema_root_not_array"
+                except FetchError as exc_next:
+                    code_next = getattr(exc_next, "code", "ERR")
+                    if code_next == "HTTP_ERROR" and "status=404" in str(exc_next):
+                        feed_status["nextweek"] = "absent_404"
+                        LOG.info("nextweek not published yet (normal mid-week)")
+                    else:
+                        feed_status["nextweek"] = f"error:{code_next}"
+                        LOG.warning("nextweek fetch failed (bonus feed, breaker intact): %s", exc_next)
             raw_bytes = meta.pop("raw_bytes")
+            meta["feed_status"] = dict(feed_status)
             atomic_write_bytes(data_dir / "raw" / f"raw_{now.strftime('%Y%m%dT%H%M%SZ')}.json",
                                raw_bytes)
+            # Le cache est écrit APRÈS la fusion : un resservi LKG rejoue exactly
+            # le même contenu (events + statuts de flux) que l'artefact publié.
             atomic_write_bytes(lkg_path, json.dumps({
                 "fetched_at_utc": iso_z(now),
                 "meta": {k: v for k, v in meta.items()},
@@ -307,6 +340,7 @@ def run_once(data_dir: Path, policy: SelectionPolicy, session: requests.Session,
             }, ensure_ascii=False).encode("utf-8"))
         except FetchError as exc:
             error = str(exc)
+            feed_status.setdefault("thisweek", f"error:{getattr(exc, 'code', 'ERR')}")
             state.record_failure(now, error)
             LOG.error("fetch failed: %s", error)
 
@@ -316,6 +350,9 @@ def run_once(data_dir: Path, policy: SelectionPolicy, session: requests.Session,
             raw_list = cached["payload"]
             meta = dict(cached.get("meta") or {})
             meta.pop("raw_bytes", None)
+            fs = dict(meta.get("feed_status") or {})
+            fs["served_from"] = "last_known_good"
+            meta["feed_status"] = fs
             fetched_at = datetime.fromisoformat(
                 str(cached.get("fetched_at_utc", iso_z(now))).replace("Z", "+00:00"))
             from_lkg = True
@@ -341,6 +378,7 @@ def run_once(data_dir: Path, policy: SelectionPolicy, session: requests.Session,
         last_modified=meta.get("last_modified"),
         supports_actual=any(isinstance(r, dict) and "actual" in r for r in raw_list),
         from_last_known_good=from_lkg,
+        feed_status=dict(meta.get("feed_status") or {}),
     )
 
     try:
