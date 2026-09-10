@@ -36,7 +36,8 @@ from pydantic import (
 # ─────────────────────────────────────────────────────────────────────────────
 # VERSIONS DE CONTRAT — toute rupture doit incrémenter la majeure
 # ─────────────────────────────────────────────────────────────────────────────
-SCHEMA_VERSION = "2.1.0"  # 2.1.0 : ajout additif de CoverageInfo (aucune rupture v2.0.0)
+SCHEMA_VERSION = "2.2.0"  # 2.2.0 : additif SourceInfo.feed_status + plafond d'âge LKG (INVALID au-delà) + warning COVERAGE_SHORTER_THAN_HORIZON (audit calendrier 2026-09-11)
+                          # 2.1.0 : ajout additif de CoverageInfo (aucune rupture v2.0.0)
 PAIR_MAPPING_METHOD = "static_currency_membership_v1"
 SESSION_POLICY_VERSION = "exchange_local_dst_aware_v1"
 NUMERIC_PARSER_VERSION = "ff_numeric_v1"
@@ -292,7 +293,7 @@ def fmt_until(hours: float) -> str:
 class SelectionPolicy(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    policy_version: str = "1.1.0"
+    policy_version: str = "1.2.0"  # 1.2.0 : plafond d'âge DUR du last-known-good (audit calendrier 2026-09-11)
     # HIGH seul sous-couvre structurellement AUD/CAD/CHF/JPY/NZD : la source tague
     # bien plus souvent HIGH les publications USD/EUR/GBP (CPI, GDP, rate decisions)
     # que l'équivalent sur devises mineures (retail sales, trade balance, PMI...),
@@ -307,6 +308,13 @@ class SelectionPolicy(BaseModel):
     soon_hours: float = 48.0
     display_timezone: str = DEFAULT_DISPLAY_TZ
     max_source_age_seconds: int = 900
+    # PLAFOND D'ÂGE DUR DU LAST-KNOWN-GOOD (audit calendrier 2026-09-11, F-2) :
+    # avant ce champ, un LKG de J−30 restait publiable à vie (score plancher
+    # 0,40 > seuil <0,4) avec generated_at_utc rajeuni — un consommateur aval
+    # ne pouvait pas distinguer « frais » de « ressassement ». Au-delà : INVALID
+    # → l'ingesteur refuse de réécrire calendar.json ; l'artefact précédent
+    # reste sur disque avec SON horodatage honnête.
+    max_last_known_good_age_seconds: int = 48 * 3600
     max_events: int = 2000
 
     @field_validator("currencies")
@@ -425,6 +433,11 @@ class SourceInfo(BaseModel):
     last_modified: Optional[str] = None
     supports_actual: bool = False
     from_last_known_good: bool = False
+    # HARNESS-CAL (audit 2026-09-11) : statut par flux fetché (« thisweek »,
+    # « nextweek ») — ok | absent_404 | error:<CODE>. Exclu du content_hash
+    # (root « source » déjà exclu) : la disponibilité variable d'un flux
+    # supplémentaire ne doit pas faire dériver le hash économique.
+    feed_status: Dict[str, str] = Field(default_factory=dict)
 
     @field_serializer("fetched_at_utc")
     def _ser(self, v: datetime, _info) -> str:
@@ -780,6 +793,14 @@ def build_payload(
         warnings.append(f"SOURCE_AGE_EXCEEDS_{policy.max_source_age_seconds}S")
     if source.from_last_known_good:
         warnings.append("SERVING_LAST_KNOWN_GOOD")
+        if age > policy.max_last_known_good_age_seconds:
+            lkg_expired = True
+            warnings.append(
+                f"LAST_KNOWN_GOOD_EXPIRED:{age}s>{policy.max_last_known_good_age_seconds}s")
+        else:
+            lkg_expired = False
+    else:
+        lkg_expired = False
     if not source.supports_actual:
         warnings.append("SOURCE_DOES_NOT_PROVIDE_ACTUAL")
 
@@ -790,6 +811,21 @@ def build_payload(
         warnings.append("ALL_SOURCE_EVENTS_IN_THE_PAST_WEEK_ROLLOVER_PENDING")
     if coverage_start is not None and coverage_start > now_utc + timedelta(days=9):
         warnings.append("SOURCE_COVERAGE_STARTS_TOO_FAR_IN_FUTURE")
+    if coverage_end is not None and coverage_end > now_utc:
+        horizon_useful_h = (coverage_end - now_utc).total_seconds() / 3600.0
+    else:
+        horizon_useful_h = None
+    # F-2 (audit 2026-09-11) : détecter la troncature INTRA-hebdomadaire — la
+    # source « this week » se tarit avant le horizon que la policy elle-même
+    # promet (soon_hours = la fenêtre de veille du consommateur). Sans ce
+    # warning, seul un rollover complet (coverage_end < now) sonnait, et le
+    # run de jeudi à 44 h de couverture passait pour un flux sain.
+    coverage_short = bool(
+        horizon_useful_h is not None and horizon_useful_h < policy.soon_hours
+    )
+    if coverage_short:
+        warnings.append(
+            f"COVERAGE_SHORTER_THAN_HORIZON:{horizon_useful_h:.1f}h<{policy.soon_hours:.0f}h")
     if not rows:
         warnings.append("EMPTY_NORMALIZED_PAYLOAD")
 
@@ -806,9 +842,10 @@ def build_payload(
         score = 0.0
     score = round(max(0.0, min(1.0, score)), 3)
 
-    if not rows or score < 0.4:
+    if not rows or score < 0.4 or lkg_expired:
         status = QualityStatus.INVALID
-    elif warnings and (is_stale or source.from_last_known_good or score < 0.85):
+    elif warnings and (is_stale or source.from_last_known_good or coverage_short
+                       or score < 0.85):
         status = QualityStatus.DEGRADED
     else:
         status = QualityStatus.VALID
@@ -925,6 +962,21 @@ def to_legacy_payload(payload: CalendarPayload, now_utc: datetime) -> Dict[str, 
     rows: List[Dict[str, Any]] = []
     summary: Dict[str, List[str]] = {}
 
+    # F-3 (audit calendrier 2026-09-11) : le ENGINE dérive sa couverture de
+    # `filters_applied.currencies` (l.2724) et NON des clés `currencies_covered`
+    # qu'il ne lit pas (grep ENGINE = 0 occurrence). Avec `ui_filters_applied`
+    # laissé à null, l'ENGINE conclut « flux global => couvert = les 8 devises
+    # du desk » et le fail-closed « devise hors couverture » du f7 devient
+    # inafectable : un setup AUD/CAD/JPY/NZD lit « aucun event S/A = risque nul »
+    # alors que la policy a EXCLU ces devises. On publie donc la couverture que
+    # le consommateur lit déjà : devises où le flux a réellement fait son travail
+    # (= couvertes ∪ genuinely-empty), en RETIRANT les exclus-par-policy (angles
+    # morts réels). C'est la seule correction qui traverse le pont legacy sans
+    # toucher au moteur gelé.
+    _cov = payload.coverage
+    claimable = set(_cov.currencies_covered) | set(_cov.currencies_no_data_in_source)
+    filters_currencies = sorted(claimable)
+
     for e in events:
         ctx = e.time_context
         rows.append({
@@ -956,9 +1008,15 @@ def to_legacy_payload(payload: CalendarPayload, now_utc: datetime) -> Dict[str, 
         })
         summary.setdefault(e.date_display, []).append(f"{e.currency} – {e.name}")
 
+    ev_times = [e.scheduled_at_utc for e in payload.events]
+    data_start = min(ev_times) if ev_times else None
+    data_end = max(ev_times) if ev_times else None
+    data_horizon_h = (round((data_end - payload.generated_at_utc).total_seconds() / 3600.0, 2)
+                      if data_end else None)
+
     return {
         "metadata": {
-            "schema_version": f"legacy-1.1.0+core-{payload.schema_version}",
+            "schema_version": f"legacy-1.2.0+core-{payload.schema_version}",
             "generated_at_utc": iso_z(payload.generated_at_utc),
             "content_hash": payload.content_hash,
             "source": payload.source.provider,
@@ -970,25 +1028,58 @@ def to_legacy_payload(payload: CalendarPayload, now_utc: datetime) -> Dict[str, 
             "data_quality_score": payload.quality.data_quality_score,
             "is_stale": payload.quality.is_stale,
             "source_age_seconds": payload.quality.source_age_seconds,
+            # HARNESS-CAL (audit 2026-09-11) : ce que sert le LKG devient visible —
+            # un consommateur peut distinguer « frais » de « ressassement ».
+            "serving_mode": "last_known_good" if payload.source.from_last_known_good else "live",
+            "feeds_status": dict(payload.source.feed_status),
+            "rejected_event_count": payload.quality.rejected_event_count,
             "warnings": list(payload.quality.warnings),
             "engine_events_count": len(rows),
             # DEPRECATED — nom historiquement trompeur (= len(rows) quel que soit le
             # policy réel, pas seulement HIGH). Conservé pour rétro-compatibilité
             # aval ; utiliser engine_events_count + impact_levels_included ci-dessous.
             "total_high_impact": len(rows),
+            # F-2 (audit 2026-09-11) : compteur VRAI des HIGH, à côté du champ
+            # deprecated ci-dessus qui compte HIGH+MEDIUM confondus.
+            "high_impact_count": sum(1 for e in payload.events if e.impact is Impact.HIGH),
             "upcoming_count": sum(1 for r in rows if r["is_upcoming"]),
             "imminent_count": sum(1 for r in rows if r["time_proximity"] == "IMMINENT"),
             "summary_by_day_basis": "display_timezone",
             "ui_filters_applied": None,
+            # F-3 (audit 2026-09-11) : LE contrat que le ENGINE lit. Dict présent
+            # (et non null) = « flux non global » ; .currencies = devises que le
+            # flux revendique (couvertes ∪ genuinely-empty), les exclus-par-policy
+            # restent hors liste => le fail-closed devise du f7 redevient vivable.
+            "filters_applied": {
+                "basis": "machine_policy",
+                "policy_version": payload.selection_policy.policy_version,
+                "currencies": filters_currencies,
+                "impact_levels": [lvl.value.lower() for lvl in payload.selection_policy.impact_levels],
+            },
             # --- Périmètre & couverture : de quoi éviter à l'aval de confondre
             #     "filtré par policy" et "aucune donnée réelle". ---
-            "impact_levels_included": [lvl.value for lvl in payload.selection_policy.impact_levels],
+            # Cassée autrefois en MAJUSCULES ici alors que les événements sont en
+            # minuscules (l.940) — deux représentations du même vocabulaire dans
+            # le même fichier ; un consommateur qui recoupait ne matchait jamais.
+            "impact_levels_included": [lvl.value.lower() for lvl in payload.selection_policy.impact_levels],
             "currencies_filter": (
                 list(payload.selection_policy.currencies)
                 if payload.selection_policy.currencies is not None else "ALL"
             ),
             "coverage_window_start_utc": payload.coverage.window_start_utc,
             "coverage_window_end_utc": payload.coverage.window_end_utc,
+            # F-2 (audit 2026-09-11) : les clés ci-dessus sont des bornes POLICY
+            # (fenêtre souhaitée) et NON des données. Les bornes RÉELLES — dernier
+            # événement réellement présent — étaient confinées au canonique
+            # calendar.latest.json, jamais exportées : un jeudi, le fichier
+            # promettait le 18/09 alors que les données finissaient au 12/09.
+            # Bornes des ÉVÉNEMENTS RETENUS (ce que l'artefact contient vraiment,
+            # et ce que le ENGINE recalcule lui-même via max(events.datetime_utc)
+            # — les deux sources doivent coïncider), et non les bornes brutes du
+            # flux qui incluraient des lignes filtrées par la policy.
+            "data_coverage_start_utc": iso_z(data_start) if data_start else None,
+            "data_coverage_end_utc": iso_z(data_end) if data_end else None,
+            "data_coverage_horizon_h": data_horizon_h,
             "currencies_scope": list(payload.coverage.currencies_scope),
             "currencies_covered": list(payload.coverage.currencies_covered),
             "currencies_excluded_by_policy": list(payload.coverage.currencies_excluded_by_policy),
