@@ -21,11 +21,13 @@ Sorties (écriture atomique) :
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
 import signal
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,10 +68,31 @@ SOURCE_URL_NEXT = os.getenv(
 )
 SOURCE_PROVIDER = "Forex Factory / Fair Economy weekly public feed"
 USER_AGENT = os.getenv("BLUESTAR_USER_AGENT", "BluestarCalendarIngestor/2.0 (+ops@bluestar)")
-DATA_DIR = Path(os.getenv("BLUESTAR_DATA_DIR", "data"))
+
+
+def _anchor_data_dir(value: str) -> Path:
+    """H2 (audit 2026-09-11) : « data » relatif était résolu contre le CWD —
+    cron (cwd=/) et Streamlit (cwd=app) produisaient silencieusement DEUX jeux
+    d'artefacts parallèles. Un chemin par défaut relatif s'ancre désormais sur
+    le dossier d'installation ; un `--data-dir` explicite reste relatif au cwd
+    (choix humain, intentionnel)."""
+    p = Path(value)
+    return p if p.is_absolute() else Path(__file__).resolve().parent / p
+
+
+DATA_DIR = _anchor_data_dir(os.getenv("BLUESTAR_DATA_DIR", "data"))
+RAW_KEEP = int(os.getenv("BLUESTAR_RAW_KEEP", "200"))   # H1 : rotation raw/
+LOCK_STEAL_AFTER_S = int(os.getenv("BLUESTAR_LOCK_STEAL_AFTER", "600"))
 
 CONNECT_TIMEOUT = 5.0
 READ_TIMEOUT = 15.0
+# H7 (le « deadline global » de la doctrine GPS, transplanté) : les timeouts
+# par opération (5 s/15 s) ne bornent PAS le total — une connexion qui
+# dégouline quelques octets toutes les <15 s peut faire durer un fetch
+# indéfiniment, et un producteur qui boucle toutes les 5 min avec un cycle
+# gelé est un producteur mort sans health.json. Chaque fetch est désormais
+# borné au temps TOTAL, contrôlé entre les chunks.
+FETCH_DEADLINE_S = float(os.getenv("BLUESTAR_FETCH_DEADLINE_S", "90"))
 MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
 CB_FAILURE_THRESHOLD = 3
 CB_RESET_SECONDS = 300
@@ -112,9 +135,83 @@ def atomic_write_json(path: Path, obj: Any) -> bytes:
 
 def read_json(path: Path) -> Optional[Any]:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return read_json_text(path)
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def read_json_text(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VERROU INTER-PROCESSUS DU PRODUCTEUR (H3, audit 2026-09-11)
+# cron et Streamlit peuvent courir en parallèle sur le même DATA_DIR ; le
+# verrou RuntimeControl de l'app est process-local et ne protège rien entre
+# processus. Verrou par création exclusive (sans dépendance), volé s'il est
+# périmé (producteur crashé). Placé dans run_once : TOUT producteur qui passe
+# par run_once est couvert, y compris l'app Streamlit qui l'importe.
+# ─────────────────────────────────────────────────────────────────────────────
+class ProducerLockBusy(RuntimeError):
+    pass
+
+
+def _lock_path(data_dir: Path) -> Path:
+    return data_dir / ".publish.lock"
+
+
+def _acquire_publish_lock(data_dir: Path) -> bool:
+    lp = _lock_path(data_dir)
+    lp.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(2):                                  # 2 essais : rattrapage périmé
+        try:
+            fd = os.open(str(lp), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                age = time.time() - lp.stat().st_mtime
+            except OSError:
+                continue                                # libéré entre-temps
+            if age > LOCK_STEAL_AFTER_S:
+                LOG.warning("verrou périmé (%.0fs > %ds) — volé", age, LOCK_STEAL_AFTER_S)
+                try:
+                    lp.unlink()
+                except OSError:
+                    pass
+                continue
+            return False
+        else:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(f"pid={os.getpid()} at={iso_z(datetime.now(UTC))}".encode("utf-8"))
+            return True
+    return False
+
+
+def _release_publish_lock(data_dir: Path) -> None:
+    lp = _lock_path(data_dir)
+    try:
+        # Ne supprimer QUE notre verrou (un autre l'aurait peut-être volé).
+        content = lp.read_text(encoding="utf-8")
+        if f"pid={os.getpid()}" in content:
+            lp.unlink()
+    except OSError:
+        pass
+
+
+def _rotate_raw(raw_dir: Path, keep: int) -> int:
+    """H1 : raw/raw_<ts>.json s'accumulait SANS plafond (~12 Mo/jour en cycle
+    300 s, jamais purgé). On garde les `keep` plus récents (0 = désactivé) ;
+    last_known_good.json n'est jamais concerné (nom hors motif)."""
+    if keep <= 0:
+        return 0
+    files = sorted(raw_dir.glob("raw_*.json"))
+    removed = 0
+    for old in files[:-keep]:
+        try:
+            old.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -211,7 +308,45 @@ class FetchError(RuntimeError):
         self.code = code
 
 
-def fetch_source(session: requests.Session, url: str) -> Tuple[Any, Dict[str, Any]]:
+def fetch_source(session: requests.Session, url: str,
+                 deadline_s: float = None) -> Tuple[Any, Dict[str, Any]]:
+    """H7 : plafond DUR au temps mural total, par worker daemon + join.
+
+    Les timeouts par opération (connect 5 s / read 15 s) ne bornent pas le
+    total : une connexion qui dégouline (36 octets/s mesurés en réel sur ce
+    CDN sous requêtes répétées) peut tenir un fetch vivant des minutes —
+    vérifié : 304 s pour un budget de 90 s, y compris en fermant la socket
+    depuis un timer (close() cross-thread ne débloque pas un read Windows
+    mis en tampon). Seul coupe-circuit fiable : exécuter le fetch bloquant
+    dans un thread daemon et l'ABANDONNER si le budget est échu. Le thread
+    zombie meurt de lui-même à l'EOF ou au premier timeout interne de socket
+    (≤ quelques minutes) ; le cycle, lui, est à l'heure.
+    """
+    if deadline_s is None:
+        deadline_s = FETCH_DEADLINE_S
+    outcome: Dict[str, Any] = {}
+
+    def _worker() -> None:
+        try:
+            outcome["value"] = _fetch_source_blocking(session, url, deadline_s)
+        except BaseException as exc:                          # noqa: BLE001
+            outcome["error"] = exc
+
+    th = threading.Thread(target=_worker, daemon=True, name="bluestar-fetch")
+    started = time.monotonic()
+    th.start()
+    th.join(max(1.0, deadline_s))
+    if th.is_alive():
+        raise FetchError("FETCH_DEADLINE_EXCEEDED",
+                         f">{deadline_s:.0f}s (worker abandonné à "
+                         f"{time.monotonic() - started:.0f}s)")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
+def _fetch_source_blocking(session: requests.Session, url: str,
+                           deadline_s: float) -> Tuple[Any, Dict[str, Any]]:
     started = time.monotonic()
     try:
         response = session.get(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), stream=True)
@@ -225,11 +360,23 @@ def fetch_source(session: requests.Session, url: str) -> Tuple[Any, Dict[str, An
         if status >= 400:
             raise FetchError("HTTP_ERROR", f"status={status}")
 
+        # Watchdog H7-bis : la vérification inter-chunks est AVEUGLE au drip —
+        # iter_content(65536) ne rend la main qu'après avoir emmagasiné 64 Ko ;
+        # une connexion qui dégouline 36 octets/s sur un payload de 11 Ko peut
+        # tenir le cycle hors limite pendant des minutes (mesuré : 304 s pour
+        # un budget de 90 s). Le seul coupe-circuit honnête est de FERMER la
+        # socket depuis un timer quand le budget est échu : le recv bloqué lève
+        # alors immédiatement.
+        # Garde bon marché entre chunks (nécessaire mais non suffisant : le
+        # plafond dur, lui, est le join() du wrapper fetch_source).
         chunks, size = [], 0
         for chunk in response.iter_content(chunk_size=65536):
             size += len(chunk)
             if size > MAX_PAYLOAD_BYTES:
                 raise FetchError("PAYLOAD_TOO_LARGE", f"{size} bytes")
+            if time.monotonic() - started > deadline_s:
+                raise FetchError("FETCH_DEADLINE_EXCEEDED",
+                                 f"{time.monotonic() - started:.0f}s > {deadline_s:.0f}s")
             chunks.append(chunk)
         body = b"".join(chunks)
 
@@ -238,7 +385,12 @@ def fetch_source(session: requests.Session, url: str) -> Tuple[Any, Dict[str, An
             "http_status": status,
             "content_type": content_type or None,
             "payload_bytes": size,
-            "payload_sha256": "sha256:" + sha256_hex(body.decode("utf-8", errors="replace")),
+            # H4 : hash des OCTETS RÉCELS. L'ancien chemin hachait le décodage
+            # errors="replace" — un corps invalide en UTF-8 produisait un hash
+            # « destructif » qui ne correspondait plus à rien d'observable.
+            # Pour tout corps UTF-8 valide (cas normal), valeur STRICTEMENT
+            # identique : aucun dérivé de hash entre versions n'existe ici.
+            "payload_sha256": "sha256:" + hashlib.sha256(body).hexdigest(),
             "etag": response.headers.get("ETag"),
             "last_modified": response.headers.get("Last-Modified"),
             "fetch_duration_ms": int((time.monotonic() - started) * 1000),
@@ -290,6 +442,20 @@ def write_health(data_dir: Path, state: IngestorState, now: datetime,
 
 def run_once(data_dir: Path, policy: SelectionPolicy, session: requests.Session,
              keep_history: int = 200) -> Optional[CalendarPayload]:
+    """Cycle unique sous verrou inter-processus (H3). Si l'autre producteur
+    (cron ou Streamlit) tient déjà le verrou, le cycle est Sauté sans effet
+    de bord — pas d'échec compté, pas d'écriture : le prochain tick reprendra."""
+    if not _acquire_publish_lock(data_dir):
+        LOG.warning("un autre producteur détient le verrou d'édition — cycle sauté")
+        return None
+    try:
+        return _run_once_impl(data_dir, policy, session, keep_history)
+    finally:
+        _release_publish_lock(data_dir)
+
+
+def _run_once_impl(data_dir: Path, policy: SelectionPolicy, session: requests.Session,
+                   keep_history: int = 200) -> Optional[CalendarPayload]:
     now = datetime.now(UTC)
     state = IngestorState(data_dir / "_state.json")
     lkg_path = data_dir / "raw" / "last_known_good.json"
@@ -338,11 +504,20 @@ def run_once(data_dir: Path, policy: SelectionPolicy, session: requests.Session,
                 "meta": {k: v for k, v in meta.items()},
                 "payload": raw_list,
             }, ensure_ascii=False).encode("utf-8"))
+            _rotate_raw(data_dir / "raw", RAW_KEEP)
         except FetchError as exc:
             error = str(exc)
             feed_status.setdefault("thisweek", f"error:{getattr(exc, 'code', 'ERR')}")
             state.record_failure(now, error)
             LOG.error("fetch failed: %s", error)
+        except OSError as exc:
+            # H3 : verrou volé entre le stat et l'O_EXCL par un tiers, ou disque
+            # plein sur le cache — un cycle doit mourir proprement, pas tuer la
+            # boucle. Compté comme échec (le breaker protège le réseau, pas le
+            # disque, mais le health.json doit refléter la panne).
+            error = f"LOCAL_IO_ERROR: {exc}"
+            state.record_failure(now, error)
+            LOG.exception("local I/O failure during fetch/cache")
 
     if raw_list is None:
         cached = read_json(lkg_path)
