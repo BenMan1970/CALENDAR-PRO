@@ -155,3 +155,111 @@ def test_atomic_writes_leave_no_temp_files(tmp_path, monkeypatch):
     ci.run_once(tmp_path, SelectionPolicy(), None)
     strays = [p for p in tmp_path.rglob(".*.tmp")]
     assert strays == []
+    lock = tmp_path / ".publish.lock"
+    assert not lock.exists()          # verrou libéré même en chemin de succès
+
+
+# ── Hygiène H1-H4 (audit calendrier 2026-09-11, seconde vague) ──────────────
+def test_h2_relative_data_dir_anchors_to_install_dir():
+    import os
+    from pathlib import Path as P
+    anchored = ci._anchor_data_dir("data")
+    assert anchored.is_absolute()
+    assert str(anchored).startswith(str(P(ci.__file__).resolve().parent))
+    explicit = ci._anchor_data_dir(os.path.join("C:\\", "srv", "bluestar"))
+    assert str(explicit).replace("\\", "/").endswith("srv/bluestar")
+
+
+def test_h1_raw_rotation_bounded(tmp_path, monkeypatch):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    for i in range(25):
+        (raw / f"raw_2026010{i:02d}T00000{i % 10}Z.json").write_text("[]", encoding="utf-8")
+    lkg = raw / "last_known_good.json"
+    lkg.write_text("{}", encoding="utf-8")
+    removed = ci._rotate_raw(raw, keep=10)
+    assert removed == 15
+    assert lkg.exists()                                   # le cache n'est jamais une roture
+    assert len(list(raw.glob("raw_*.json"))) == 10
+    assert ci._rotate_raw(raw, keep=0) == 0               # 0 = purge désactivée
+
+
+def test_h3_second_producer_is_shut_out(tmp_path):
+    """Le verrou inter-processus doit rendre deux `run_once` concurrents
+    sériels : le second échoue proprement (None, sans effet de bord)."""
+    assert ci._acquire_publish_lock(tmp_path) is True
+    assert ci._acquire_publish_lock(tmp_path) is False    # occupé, frais
+    ci._release_publish_lock(tmp_path)
+    assert ci._acquire_publish_lock(tmp_path) is True     # re-acquis après release
+    ci._release_publish_lock(tmp_path)
+
+
+def test_h3_stale_lock_is_stolen(tmp_path, monkeypatch):
+    import os, time
+    lock = tmp_path / ".publish.lock"
+    lock.write_text("pid=999999 at=old", encoding="utf-8")
+    old = time.time() - (ci.LOCK_STEAL_AFTER_S + 120)
+    os.utime(lock, (old, old))
+    assert ci._acquire_publish_lock(tmp_path) is True     # vol du verrou périmé
+    ci._release_publish_lock(tmp_path)
+
+
+def test_h3_release_only_ours(tmp_path):
+    lock = tmp_path / ".publish.lock"
+    lock.write_text("pid=424242 at=other", encoding="utf-8")   # verrou d'un TIERS
+    ci._release_publish_lock(tmp_path)
+    assert lock.exists()                              # on ne le supprime pas
+
+
+def test_h3_run_once_skips_when_locked(tmp_path, monkeypatch):
+    _installer(monkeypatch, primary=[_row("ISM", "USD", 6)])
+    assert ci._acquire_publish_lock(tmp_path) is True
+    assert ci.run_once(tmp_path, SelectionPolicy(), None) is None
+    assert not (tmp_path / "calendar.json").exists()  # aucun effet de bord
+    ci._release_publish_lock(tmp_path)
+    assert ci.run_once(tmp_path, SelectionPolicy(), None) is not None
+
+
+def test_h4_payload_hash_is_of_real_bytes():
+    """Deux volets : (a) pour tout corps UTF-8 valide, l'ancien et le nouveau
+    chemin donnent la MÊME valeur (aucune dérive de hash entre versions) ;
+    (b) le code source utilise bien le hash des octets, plus le décodage
+    destructif errors='replace' (verrou textuel du correctif H4)."""
+    import hashlib
+    from calendar_core import sha256_hex
+    good = b'[{"title":"OK","impact":"High"}]'
+    assert sha256_hex(good.decode("utf-8")) == hashlib.sha256(good).hexdigest()
+    src = open(ci.__file__, encoding="utf-8").read()
+    assert 'hashlib.sha256(body).hexdigest()' in src
+    assert 'errors="replace"' not in src.split("payload_sha256")[1][:200]
+
+
+def test_h7_dripping_connection_is_cut_by_deadline():
+    """H7 : une connexion qui dégouline (timeout par opération jamais atteint,
+    total infini) doit être coupée par le deadline global du fetch."""
+    import time
+
+    class _DripResponse:
+        status_code = 200
+        headers = {"Content-Type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def iter_content(self, chunk_size=65536):
+            while True:                     # 1 octet par « chunk », sans fin
+                yield b" "
+
+    class _DripSession:
+        def get(self, url, timeout=None, stream=False):
+            return _DripResponse()
+
+    t0 = time.monotonic()
+    with pytest.raises(ci.FetchError) as ei:
+        ci.fetch_source(_DripSession(), "https://drip.invalid/feed.json", deadline_s=1.0)
+    elapsed = time.monotonic() - t0
+    assert "FETCH_DEADLINE_EXCEEDED" in str(ei.value)
+    assert elapsed < 10.0                   # coupé sec, pas laissé courir

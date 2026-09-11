@@ -36,7 +36,7 @@ from pydantic import (
 # ─────────────────────────────────────────────────────────────────────────────
 # VERSIONS DE CONTRAT — toute rupture doit incrémenter la majeure
 # ─────────────────────────────────────────────────────────────────────────────
-SCHEMA_VERSION = "2.2.0"  # 2.2.0 : additif SourceInfo.feed_status + plafond d'âge LKG (INVALID au-delà) + warning COVERAGE_SHORTER_THAN_HORIZON (audit calendrier 2026-09-11)
+SCHEMA_VERSION = "2.3.0"  # 2.3.0 : rollover hebdo neutre (ND-013) — COVERAGE_SHORTER_THAN_HORIZON + DEGRADED seulement si cause anormale ; flag meta week_rollover_pending
                           # 2.1.0 : ajout additif de CoverageInfo (aucune rupture v2.0.0)
 PAIR_MAPPING_METHOD = "static_currency_membership_v1"
 SESSION_POLICY_VERSION = "exchange_local_dst_aware_v1"
@@ -459,6 +459,9 @@ class QualityInfo(BaseModel):
     data_quality_score: float = Field(ge=0.0, le=1.0)
     warnings: Tuple[str, ...] = ()
     rejections: Tuple[str, ...] = ()
+    # ND-013 : horizon court CAUSÉ par le flux semaine suivante non publié =
+    # état structurel neutre (flag méta + note), plus un signal d'alerte.
+    week_rollover_pending: bool = False
 
 
 class CoverageInfo(BaseModel):
@@ -823,7 +826,26 @@ def build_payload(
     coverage_short = bool(
         horizon_useful_h is not None and horizon_useful_h < policy.soon_hours
     )
-    if coverage_short:
+    # [ND-013] Deux causes d'horizon court, deux traitements (sémantique
+    # IDENTIQUE à la macro v6.1 — classification classify_feed_horizon) :
+    #   - cause structurelle : flux primaire OK, secondaire (nextweek) non
+    #     intégré (404 normal lundi-vendredi, ou erreur réseau) → « rollover
+    #     hebdo » : PAS de warning, PAS de dégradation. Le desk recalcule son
+    #     propre fail-closed F7 sur max(events) vs 168h — inchangé ; la
+    #     visibilité reste portée par coverage_note + flag méta.
+    #   - cause anormale (nextweek intégré et horizon court) ou granularité
+    #     feed_status absente → comportement 2.2.0 conservé à l'identique.
+    rollover_pending = False
+    _fs = dict(getattr(source, "feed_status", None) or {})
+    if (
+        coverage_short
+        and _fs
+        and _fs.get("thisweek", "ok") == "ok"
+        and (_fs.get("nextweek") or "ok") != "ok"
+        and "ALL_SOURCE_EVENTS_IN_THE_PAST_WEEK_ROLLOVER_PENDING" not in warnings
+    ):
+        rollover_pending = True
+    if coverage_short and not rollover_pending:
         warnings.append(
             f"COVERAGE_SHORTER_THAN_HORIZON:{horizon_useful_h:.1f}h<{policy.soon_hours:.0f}h")
     if not rows:
@@ -844,7 +866,8 @@ def build_payload(
 
     if not rows or score < 0.4 or lkg_expired:
         status = QualityStatus.INVALID
-    elif warnings and (is_stale or source.from_last_known_good or coverage_short
+    elif warnings and (is_stale or source.from_last_known_good
+                       or (coverage_short and not rollover_pending)
                        or score < 0.85):
         status = QualityStatus.DEGRADED
     else:
@@ -852,6 +875,7 @@ def build_payload(
 
     quality = QualityInfo(
         status=status,
+        week_rollover_pending=rollover_pending,
         is_stale=is_stale,
         source_age_seconds=age,
         raw_event_count=len(raw_list),
@@ -1080,11 +1104,19 @@ def to_legacy_payload(payload: CalendarPayload, now_utc: datetime) -> Dict[str, 
             "data_coverage_start_utc": iso_z(data_start) if data_start else None,
             "data_coverage_end_utc": iso_z(data_end) if data_end else None,
             "data_coverage_horizon_h": data_horizon_h,
+            "week_rollover_pending": payload.quality.week_rollover_pending,
             "currencies_scope": list(payload.coverage.currencies_scope),
             "currencies_covered": list(payload.coverage.currencies_covered),
             "currencies_excluded_by_policy": list(payload.coverage.currencies_excluded_by_policy),
             "currencies_no_data_in_source": list(payload.coverage.currencies_no_data_in_source),
-            "coverage_note": render_coverage_note(payload.coverage, payload.selection_policy.impact_levels),
+            "coverage_note": (
+                (render_coverage_note(payload.coverage, payload.selection_policy.impact_levels) or "")
+                + (" Rollover hebdomadaire en attente : flux semaine suivante non publié "
+                   "(publication en fin de semaine) — couverture réelle jusqu'au "
+                   + str(iso_z(data_end) if data_end else "—")
+                   + " ; au-delà, silence non mesuré, pas risque nul."
+                   if payload.quality.week_rollover_pending else "")
+            ).strip() or None,
         },
         "events": rows,
         "events_engine": rows,
