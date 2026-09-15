@@ -38,18 +38,27 @@ import streamlit as st
 from calendar_core import (
     CalendarEvent,
     CalendarPayload,
+    DEFAULT_DISPLAY_TZ,
+    DEFAULT_POLICY,
     Impact,
     QualityStatus,
     SelectionPolicy,
     Session,
     TimeProximity,
     compute_time_context,
+    day_name,                     # [F7 port] table fixe locale-safe
     iso_z,
     pairs_for_currency,
     refresh_time_contexts,
     to_legacy_payload,
+    tz_environment,
 )
-from calendar_ingestor import build_session, run_once, _anchor_data_dir
+from calendar_ingestor import (
+    build_session,
+    publish_lock_held,
+    run_once,
+    _anchor_data_dir,
+)
 
 # H3 (audit 2026-09-11) : le verrou inter-processus vit dans run_once — que
 # l'ingestion parte d'ici ou d'un cron, le même chemin sérialise les deux.
@@ -68,8 +77,17 @@ DATA_DIR = _anchor_data_dir(os.getenv("BLUESTAR_DATA_DIR", "data"))
 
 CANONICAL_PATH = DATA_DIR / "calendar.latest.json"
 LEGACY_PATH = DATA_DIR / "calendar.legacy.json"
+CALENDAR_JSON_PATH = DATA_DIR / "calendar.json"   # alias servi au moteur desk
 HEALTH_PATH = DATA_DIR / "health.json"
 STATE_PATH = DATA_DIR / "_state.json"
+
+# [B3 audit OPUS] Producteur ou lecteur : en production l'UNIQUE producteur
+# doit être le cron/systemd (mort fragmentaire incluse). BLUESTAR_DISABLE_INGEST
+# rend l'application strictement lectrice : plus aucun appel réseau sortant,
+# plus de bouton d'ingestion, l'affichage lit les artefacts tels que publiés.
+INGEST_ENABLED = os.getenv("BLUESTAR_DISABLE_INGEST", "false").strip().lower() not in {
+    "1", "true", "yes", "on"
+}
 
 # Fréquence de tentative réseau/ingestion.
 INGEST_INTERVAL_SECONDS = max(
@@ -83,10 +101,9 @@ UI_REFRESH_SECONDS = max(
     int(os.getenv("BLUESTAR_UI_REFRESH_INTERVAL", "10")),
 )
 
-DEFAULT_DISPLAY_TIMEZONE = os.getenv(
-    "BLUESTAR_DISPLAY_TZ",
-    "Africa/Casablanca",
-)
+# [F2 port] source unique : le core résout déjà BLUESTAR_DISPLAY_TZ (même nom
+# d'env, même défaut Casablanca) — plus de seconde littéralité à faire dériver.
+DEFAULT_DISPLAY_TIMEZONE = DEFAULT_DISPLAY_TZ
 
 DISPLAY_TIMEZONES: Tuple[str, ...] = (
     "Africa/Casablanca",
@@ -135,6 +152,11 @@ ALL_PROXIMITIES: Tuple[TimeProximity, ...] = (
     TimeProximity.LATER,
     TimeProximity.PAST,
 )
+
+# [audit OPUS] le mappage asset est une HEURISTIQUE D'AFFICHAGE UI, pas une
+# donnée source : versionné + divulgué dans l'onglet, pour que sa provenance
+# soit vérifiable à l'écran plutôt que dévinée depuis le code.
+UI_ASSET_MAPPING_VERSION = "ui_assets_overlay_v1"
 
 ASSET_MAPPING: Dict[str, Tuple[str, ...]] = {
     "USD": (
@@ -185,6 +207,10 @@ ASSET_MAPPING: Dict[str, Tuple[str, ...]] = {
         "USD/CNY", "EUR/CNY",
         "CN50",
     ),
+    # [audit OPUS] clé morte : get_affected_assets sort le label « Global »
+    # avant tout lookup. Conservée comme documentation du vocabulaire ; ne
+    # pas la brancher sans retirer le raccourci « Global » (sinon double
+    # affiliation de chaque événement global).
     "ALL": (),
 }
 
@@ -245,17 +271,21 @@ MACHINE_POLICY = SelectionPolicy(
         in {"1", "true", "yes", "on"}
     ),
     display_timezone=DEFAULT_DISPLAY_TIMEZONE,
+    # [F7 port] défauts DÉRIVÉS de la politique du core — jamais dupliqués
+    # (leçon macro : « 192 codé en dur ici vs 168 servi ailleurs » est
+    # exactement la dérive silencieuse que ce port élimine). Les env vars
+    # restent des overrides opérationnels légitimes.
     window_past_hours=float(
-        os.getenv("BLUESTAR_WINDOW_PAST_HOURS", "72")
+        os.getenv("BLUESTAR_WINDOW_PAST_HOURS", str(DEFAULT_POLICY.window_past_hours))
     ),
     window_future_hours=float(
-        os.getenv("BLUESTAR_WINDOW_FUTURE_HOURS", "192")
+        os.getenv("BLUESTAR_WINDOW_FUTURE_HOURS", str(DEFAULT_POLICY.window_future_hours))
     ),
     imminent_hours=float(
-        os.getenv("BLUESTAR_IMMINENT_HOURS", "6")
+        os.getenv("BLUESTAR_IMMINENT_HOURS", str(DEFAULT_POLICY.imminent_hours))
     ),
     soon_hours=float(
-        os.getenv("BLUESTAR_SOON_HOURS", "48")
+        os.getenv("BLUESTAR_SOON_HOURS", str(DEFAULT_POLICY.soon_hours))
     ),
     max_source_age_seconds=int(
         os.getenv("BLUESTAR_MAX_SOURCE_AGE_SECONDS", "900")
@@ -280,6 +310,10 @@ class RuntimeControl:
     last_attempt_monotonic: float = 0.0
     last_attempt_utc: Optional[datetime] = None
     last_result_ok: Optional[bool] = None
+    # [B3 audit OPUS] « verrou occupé par l'autre producteur » n'est PAS un
+    # échec. Sans ce drapeau, les deux se lisaient identique (False) et le
+    # tableau de bord annonçait une panne pendant qu'un cron travaillait.
+    last_skipped_locked: bool = False
     last_runtime_error: Optional[str] = None
 
 
@@ -289,8 +323,40 @@ def runtime_control() -> RuntimeControl:
 
 
 @st.cache_resource
-def ingestion_http_session() -> requests.Session:
-    return build_session()
+def _tz_env_forensic() -> Dict[str, Any]:
+    # figé par processus : la source des règles TZ ne change pas en cours de
+    # vie du serveur ; coûte 1 ms la première fois, zéro après.
+    return tz_environment()
+
+
+@st.cache_resource
+def _log_startup_forensics() -> str:
+    """[câblage audit OPUS] Une fois par processus : où sont les artefacts et
+    quelles règles horaires governent l'affichage. En cas d'heure fausse, la
+    réponse est dans la première ligne du log, pas dans une hypothèse."""
+    # La conversion UTC est posée AVANT toute considération de handler : si
+    # Streamlit a déjà configuré la racine, nos datefmt à nous ne mentiront
+    # jamais non plus.
+    logging.Formatter.converter = time.gmtime
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format='{"ts":"%(asctime)s","level":"%(levelname)s",'
+                   '"logger":"%(name)s","msg":"%(message)s"}',
+            datefmt="%Y-%m-%dT%H:%M:%SZ",
+        )
+    msg = "app data_dir=%s | ingest_enabled=%s | tz=%s" % (
+        DATA_DIR, INGEST_ENABLED, _tz_env_forensic())
+    LOG.info(msg)
+    return msg
+
+
+# [B4 audit OPUS] Plus de Session HTTP partagée via cache_resource : le
+# worker daemon abandonné par le plafond H7 la gardait ouverte et un cycle
+# suivant chevauchant marchait dessus (requests.Session n'est pas
+# thread-safe ; l'état de garde de Retry se partageait entre threads).
+# build_session() par appel = coût de trois fois rien (pool 4 connexions,
+# un fetch toutes les 300 s) et le problème disparaît par construction.
 
 
 # =============================================================================
@@ -310,15 +376,28 @@ def read_json(path: Path) -> Optional[Any]:
 
 def load_payload() -> Optional[CalendarPayload]:
     """
-    Charge directement le fichier courant.
+    Charge le fichier courant, parsé et validé une seule fois par version.
 
-    Aucun st.cache_data n'est utilisé afin qu'un artefact publié atomiquement
-    soit visible au prochain fragment rerun.
+    [perf audit OPUS] L'onglet "exports"/"quality" est rendu À CHAQUE tick
+    du fragment : le parse + validation Pydantic de l'artefact complet
+    (~150 Ko) tournait toutes les UI_REFRESH_SECONDS pour un fichier qui
+    change au plus toutes les INGEST_INTERVAL. Le cache est clé sur
+    (mtime_ns, taille) : un artefact publié atomiquement change ces deux
+    stat — il est donc visible au prochain fragment rerun, promesse
+    sémantique inchangée.
     """
-    raw = read_json(CANONICAL_PATH)
+    try:
+        st_ = CANONICAL_PATH.stat()
+    except OSError:
+        return None
+    return _load_payload_cached(str(CANONICAL_PATH), st_.st_mtime_ns, st_.st_size)
+
+
+@st.cache_data(show_spinner=False)
+def _load_payload_cached(path_str: str, mtime_ns: int, size: int) -> Optional[CalendarPayload]:
+    raw = read_json(Path(path_str))
     if raw is None:
         return None
-
     try:
         return CalendarPayload.model_validate(raw)
     except Exception as exc:  # validation Pydantic détaillée dans les diagnostics
@@ -372,6 +451,11 @@ def ensure_artifacts(force: bool = False) -> bool:
     reference = now_utc()
     control = runtime_control()
 
+    # [B3 audit OPUS] mode lecteur pur : aucun appel réseau sortant depuis
+    # ce processus — l'UI affiche les artefacts tels que le cron les publie.
+    if not INGEST_ENABLED:
+        return CANONICAL_PATH.exists()
+
     if not should_attempt_ingestion(reference, force=force):
         return CANONICAL_PATH.exists()
 
@@ -418,17 +502,26 @@ def ensure_artifacts(force: bool = False) -> bool:
         payload = run_once(
             data_dir=DATA_DIR,
             policy=MACHINE_POLICY,
-            session=ingestion_http_session(),
+            session=build_session(),   # [B4] session jetable par cycle
         )
 
         control.last_result_ok = payload is not None
 
         if payload is None:
-            LOG.error(
-                "Ingestion produced no publishable payload; "
-                "previous artifact remains untouched"
-            )
+            control.last_skipped_locked = publish_lock_held(DATA_DIR)
+            if control.last_skipped_locked:
+                LOG.info(
+                    "Ingestion SKIPPÉE — verrou d'édition détenu par un "
+                    "autre producteur (cron ?) ; les artefacts sur disque "
+                    "restent la vérité affichée"
+                )
+            else:
+                LOG.error(
+                    "Ingestion produced no publishable payload; "
+                    "previous artifact remains untouched"
+                )
         else:
+            control.last_skipped_locked = False
             LOG.info(
                 "Ingestion complete | events=%d | quality=%s | hash=%s",
                 len(payload.events),
@@ -506,7 +599,7 @@ def prepare_view_events(
                 "scheduled_at_display": local,
                 "display_timezone": filters.policy.display_timezone,
                 "date_display": local.strftime("%Y-%m-%d"),
-                "day_of_week": local.strftime("%A").upper(),
+                "day_of_week": day_name(local),       # [F7 port] locale-safe
             }
         )
 
@@ -556,8 +649,16 @@ def format_numeric(value: Any) -> str:
     if value is None:
         return "—"
 
-    if value.parse_status == "ABSENT" or value.value is None:
+    if value.parse_status == "ABSENT" or not value.raw:
         return "—"
+
+    # [audit OPUS] « pas de nombre » n'est pas « pas d'information » : une
+    # valeur non numérique mais SIGNIFIANTE (votes MPC « 3-0-6 », composites
+    # « 2.84|2.6 », texte UNPARSEABLE) était écrasée derrière un tiret — le
+    # pipeline la portait, l'UI la jetait. On l'affiche telle quelle ; le
+    # tiret retrouve sa stricte signification : ABSENT.
+    if value.value is None:
+        return value.raw
 
     if value.unit == "percent":
         return f"{value.value:.2f}%"
@@ -707,6 +808,26 @@ def build_legacy_bytes(
     ).encode("utf-8")
 
 
+def serve_legacy_bytes(
+    payload: CalendarPayload,
+    reference: datetime,
+) -> Tuple[bytes, str]:
+    """[audit OPUS] Le téléchargement sert l'artefact SUR DISQUE — l'octet
+    pour l'octet ce que le moteur du desk consomme — et non une regénération
+    à l'horloge du clic (métadonnées anciennes + countdowns re-scrubbés : le
+    fichier téléchargé n'était jamais celui publié, alors que la légende le
+    promettait). Repli sur regénération uniquement si le fichier manque
+    (dev/test hors pipeline), et la légende le dit.
+    Retourne (octets, provenance : « disque » | « regénéré »)."""
+    try:
+        disk = CALENDAR_JSON_PATH.read_bytes()
+        if disk:
+            return disk, "disque"
+    except OSError:
+        pass
+    return build_legacy_bytes(payload, reference), "regénéré"
+
+
 def render_command_bar(
     payload: CalendarPayload,
     reference: datetime,
@@ -716,7 +837,7 @@ def render_command_bar(
     Barre de commande persistante en haut de page.
     L'export canonique n'est plus enfoui dans un onglet.
     """
-    legacy_bytes = build_legacy_bytes(payload, reference)
+    legacy_bytes, _legacy_src = serve_legacy_bytes(payload, reference)
     quality_text, _tone = QUALITY_META.get(
         payload.quality.status,
         (payload.quality.status.value, ""),
@@ -760,8 +881,13 @@ def render_command_bar(
                 type="primary",
                 key="dl_calendar_topbar",
                 help=(
-                    "Artefact legacy v1 dérivé du payload canonique. "
-                    "Aucun filtre UI appliqué."
+                    "Artefact legacy v1 "
+                    + ("— OCTETS EXACTS du calendar.json publié sur disque "
+                       "(identique à ce que lit le moteur desk)."
+                       if _legacy_src == "disque" else
+                       "— régénéré faute de fichier sur disque (anormal en "
+                       "production : vérifier l'émission de l'ingestor).")
+                    + " Aucun filtre UI appliqué."
                 ),
             )
             html_block(
@@ -804,6 +930,17 @@ def render_sidebar() -> ViewFilters:
             key=f"impact_{impact.value}",
         ):
             selected_impacts.append(impact)
+
+    # [audit OPUS] Honnêteté du contrôle : la politique machine (HIGH +
+    # MEDIUM) définit ce qui ENTRE dans l'artefact ; cocher LOW/HOLIDAY ne
+    # peut rien ajouter — ces lignes ne sont pas publiées. Sans mention,
+    # deux cases donnaient l'illusion de commander un contenu inexistant.
+    if {Impact.LOW, Impact.HOLIDAY} & set(selected_impacts):
+        st.sidebar.caption(
+            "ℹ️ La politique machine n'ingère que HIGH et MEDIUM : "
+            "LOW/HOLIDAY sont absents de l'artefact — ces cases ne peuvent "
+            "rien ajouter à la vue."
+        )
 
     side_label("Devises")
 
@@ -895,17 +1032,25 @@ def render_sidebar() -> ViewFilters:
     if "refresh_request" not in st.session_state:
         st.session_state.refresh_request = 0
 
-    if st.sidebar.button(
+    if INGEST_ENABLED and st.sidebar.button(
         "Forcer une ingestion",
         use_container_width=True,
         type="secondary",
     ):
         st.session_state.refresh_request += 1
 
-    st.sidebar.caption(
-        f"Ingestion distante : toutes les "
-        f"{INGEST_INTERVAL_SECONDS // 60} min"
-    )
+    if INGEST_ENABLED:
+        st.sidebar.caption(
+            f"Ingestion distante : toutes les "
+            f"{INGEST_INTERVAL_SECONDS // 60} min"
+        )
+    else:
+        # [B3 audit OPUS] mode lecteur affiché, pas deviné.
+        st.sidebar.caption(
+            "🔒 **Lecture seule** (`BLUESTAR_DISABLE_INGEST`) — un producteur "
+            "externe (cron/systemd) alimente les artefacts ; cette instance "
+            "n'émet aucun appel réseau sortant."
+        )
     st.sidebar.caption(f"DATA_DIR : `{DATA_DIR}`")
 
     # Important : une sélection vide reste un tuple vide.
@@ -1160,8 +1305,8 @@ def render_assets_view(
         for asset in get_affected_assets(event, extended=True):
             asset_events.setdefault(asset, []).append(event)
 
-    tab_metals, tab_indices, tab_energy, tab_forex = st.tabs(
-        ["🥇 Métaux", "📈 Indices", "🛢️ Énergie", "💱 Forex"]
+    tab_metals, tab_indices, tab_energy, tab_forex, tab_global = st.tabs(
+        ["🥇 Métaux", "📈 Indices", "🛢️ Énergie", "💱 Forex", "🌐 Global"]
     )
 
     categories = (
@@ -1178,6 +1323,21 @@ def render_assets_view(
                 })
             ),
         ),
+        (
+            # [audit OPUS] les événements globaux portaient un libellé
+            # d'actif spécial — absent de toute catégorie : ils étaient
+            # produits, mappés, puis invisibles. Le cinquième onglet les
+            # rend enfin atteignables.
+            tab_global,
+            ("Global — tous les marchés",),
+        ),
+    )
+
+    st.caption(
+        "Provenance des actifs diffusés ici : chevauchement d'affichage UI "
+        f"« {UI_ASSET_MAPPING_VERSION} » — un événement devise est affecté "
+        "à tout actif contenant cette devise ; ce n'est PAS une donnée de "
+        "la source ni un avis du moteur."
     )
 
     for tab, assets in categories:
@@ -1274,6 +1434,12 @@ def render_quality_view(
             else None
         ),
         "last_process_result_ok": control.last_result_ok,
+        # [B3 audit OPUS] distinguer l'échec du « cycle volontairement
+        # sauté, un autre producteur tient le verrou » — et rendre visible
+        # le mode lecteur seul.
+        "last_cycle_skipped_lock": control.last_skipped_locked,
+        "ingestion_enabled": INGEST_ENABLED,
+        "tz": _tz_env_forensic(),
         "last_runtime_error": control.last_runtime_error,
     })
 
@@ -1320,10 +1486,17 @@ def render_exports(
     st.caption(
         "L’export principal est disponible en permanence dans la barre "
         "supérieure. Les téléchargements n’appliquent aucun filtre UI et "
-        "correspondent exactement à l’artefact validé par l’ingestor."
+        "sont **l’artefact même publié par l’ingestor** (octets du fichier "
+        "`calendar.json` sur disque, tel que le lit le moteur desk)."
     )
 
-    legacy_bytes = build_legacy_bytes(payload, reference)
+    legacy_bytes, _legacy_src = serve_legacy_bytes(payload, reference)
+    if _legacy_src != "disque":
+        st.warning(
+            "⚠️ calendar.json absent sur disque — l'export est une "
+            "REGÉNÉRATION de service (horloge de rendu), pas l'artefact "
+            "publié. Vérifier que l'ingestor a bien émis."
+        )
     health_bytes = json.dumps(
         health or {}, indent=2, ensure_ascii=False, sort_keys=False
     ).encode("utf-8")
@@ -1388,22 +1561,22 @@ def consume_manual_refresh_request() -> bool:
     return True
 
 
-@st.fragment(run_every=UI_REFRESH_SECONDS)
-def render_live_application(filters: ViewFilters) -> None:
-    """
-    Le fragment se réexécute même sans interaction utilisateur.
-
-    Il recalcule les countdowns toutes les UI_REFRESH_SECONDS secondes.
-    L'accès distant reste limité par INGEST_INTERVAL_SECONDS.
-    """
+def _render_application_body(filters: ViewFilters) -> None:
     reference = now_utc()
     force = consume_manual_refresh_request()
 
-    with st.spinner(
-        "Initialisation du calendrier..."
-        if not CANONICAL_PATH.exists()
-        else "Rafraîchissement des données..."
-    ):
+    first_load = not CANONICAL_PATH.exists()
+    if first_load or force:
+        # [audit OPUS] le spinner n'est plus un clinotement toutes les 10 s
+        # qui donnait à voir un « travail » inexistant (lecture locale de
+        # quelques millisecondes) : il n'apparaît que là où une attente est
+        # réelle — premier chargement ou ingestion forcée.
+        with st.spinner(
+            "Initialisation du calendrier..." if first_load
+            else "Ingestion forcée en cours..."
+        ):
+            artifact_available = ensure_artifacts(force=force)
+    else:
         artifact_available = ensure_artifacts(force=force)
 
     payload = load_payload()
@@ -1516,6 +1689,29 @@ def render_live_application(filters: ViewFilters) -> None:
         f"Auto-refresh UI : "
         f"{'actif' if filters.auto_refresh else 'désactivé'}"
     )
+
+
+# Deux fragments distincts : run_every est fixé À LA DÉCORATION, pas à
+# l'exécution — la case « Rafraîchissement visuel » ne pouvait donc rien
+# changer dans la version précédente (les deux branches de main() appelaient
+# le même fragment périodique : contrôle décoratif, audité faux). Le dispatch
+# sur filters.auto_refresh est désormais RÉEL (audit OPUS).
+@st.fragment(run_every=UI_REFRESH_SECONDS)
+def _live_fragment(filters: ViewFilters) -> None:
+    _render_application_body(filters)
+
+
+@st.fragment
+def _manual_fragment(filters: ViewFilters) -> None:
+    _render_application_body(filters)
+
+
+def render_live_application(filters: ViewFilters) -> None:
+    """Point d'entrée unique : le rerun périodique suit la case UI."""
+    if filters.auto_refresh:
+        _live_fragment(filters)
+    else:
+        _manual_fragment(filters)
 
 
 # =============================================================================
@@ -1851,15 +2047,13 @@ def main() -> None:
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+    _log_startup_forensics()   # data_dir résolu + autorité tzdata, une fois
+
     filters = render_sidebar()
 
-    if filters.auto_refresh:
-        render_live_application(filters)
-    else:
-        # Le fragment est quand même appelé une première fois.
-        # Les reruns périodiques ne peuvent pas être modifiés dynamiquement
-        # par le décorateur, mais la désactivation reste explicite côté UI.
-        render_live_application(filters)
+    # Le dispatch auto-refresh est dans render_live_application (deux
+    # fragments, un périodique et un manuel — case UI enfin agissante).
+    render_live_application(filters)
 
 
 if __name__ == "__main__":
