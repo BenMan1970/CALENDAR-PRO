@@ -1,9 +1,15 @@
-# BLUESTAR calendar — runtime
-streamlit>=1.37,<2.0
-pydantic>=2.6,<3.0
-requests>=2.32,<3.0
-urllib3>=2.2,<3.0
-tzdata>=2024.1          # zoneinfo sous Windows / images slim
+# BLUESTAR calendar — runtime.
+# Épinglement intégral (2026-09-15, port B2 du macro) : les versions exactes
+# sous lesquelles les 94 tests verts ont été produits. Un intervalle ouvert
+# (« >=1.37,<2.0 ») laisse Streamlit Cloud / pip installer une version JAMAIS
+# testée ici — la dérive d'environnement est un incident, pas une surprise.
+# Pour monter une version : modifier, relancer la suite, pousser — la CI
+# (.github/workflows/ci.yml) est le filet, pas l'alibi.
+streamlit==1.63.0
+pydantic==2.13.4
+requests==2.34.2
+urllib3==2.7.0          # >=2.2 requis par Retry(backoff_jitter=…) (calendar_ingestor)
+tzdata==2026.3          # zoneinfo sous Windows / images slim (Wellington/Sydney/DST [B8])
 
 # dev / CI
-pytest>=8.0,<9.0
+pytest==9.1.1           # l'ancien « >=8.0,<9.0 » était contredit par l'usage réel (9.1.1)

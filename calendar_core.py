@@ -4,6 +4,99 @@ BLUESTAR · calendar_core
 Logique métier pure. Aucun import Streamlit, aucun I/O réseau, aucun accès disque.
 Toutes les fonctions sont déterministes : le temps est TOUJOURS injecté.
 
+=============================================================================
+v2.4.1 (15/09/2026) — CORRECTION DE L'AUDIT OPUS (CALENDAR PRO A CORRIGER/
+audit OPUS-CALENDAR.md), chaque point d'abord REVÉRIFIÉ empiriquement sur le
+flux live figé (105 lignes) — voir le matrix de verdicts dans le rapport :
+  [B1] invariant de rejet : lignes normalisées + zéro événement + warning de
+       vocabulaire = artefact de parsing, plus jamais « VALID 1.000 vide »
+       (mesuré : avant, 105 rows/0 event/VALID ; après, INVALID explicite,
+       l'ingestor refuse et l'artefact précédent survit). Dérive partielle →
+       DEGRADED (−0.2). Semaine calme légitime → inchangée, publiable.
+       MIROIR EXACT côté macro (calendar_layer v6.4, bascule actée).
+  [B2] autorité tzdata : le paquet pip épinglé est placé EN TÊTE de TZPATH
+       avant tout ZoneInfo() — sur une image au tzdata système antérieur,
+       l'app aurait affiché de fausses heures marocaines dès le 20/09/2026
+       (GMT permanent, règle encodée dans tzdata 2026.3, vérifiée ici).
+       ``tz_environment()`` le prouve à froid (health.json + logs + UI).
+  [COV] COVERAGE_SHORTER_THAN_HORIZON jugé sur les ÉVÉNEMENTS (ce que l'aval
+       lit en data_coverage_end_utc), non sur toutes les rows : ~24 h d'angle
+       mort en moins ; repli rows si events vide (semaine calme).
+  [FUS] payload_sha256 = formule d'agrégation macro (jonction « | » des sha
+       par flux ok) : la signature couvre enfin la FUSION consommée ;
+       feed_sha256 + octets des deux flux archivés dans raw/.
+Verrouillés par test_calendar_pro_locks_v241.py (15 tests, total 109) ; le
+content_hash économique est resté IDENTIQUE avant/après (reconcile 19:19Z :
+P1 sha256:73b8daa2…, 0 divergence) — seule la réaction à un flux empoisonné
+change. Côté app/ingestor : B3 (verrou≠échec, mode lecteur
+BLUESTAR_DISABLE_INGEST, exit 3), B4 (session HTTP jetable par cycle),
+exports = octets du disque, format_numeric affiche le brut non numérique,
+fragment auto-refresh enfin agissant, logs UTC, health.json forensique.
+
+=============================================================================
+v2.4.0 (15/09/2026) — PORT DES CORRECTIFS calendar_layer v6/v6.1/v6.2 (app
+macro) vers l'app TA. Objectif : les deux modules de normalisation produisent
+des LIGNES ET UNE PROJECTION ÉCONOMIQUES IDENTIQUES sur le même flux brut
+(reconvergence par ``occurrence_id`` + ``content_hash`` commun, contrat
+ENGINE.V10 « events_engine », ``extra=ignore`` — see RUNBOOK).
+Chaque port est nommé par son tag macro d'origine :
+
+  [F2]  fuseau d'affichage plus codé en dur : ``BLUESTAR_DISPLAY_TZ`` override,
+        défaut inchangé « Africa/Casablanca » (zéro changement visible ici ;
+        le HACHAGE n'y est plus sensible grâce à [F5]).
+  [F3]  placeholder « — » dans les lignes legacy (forecast/previous/actual),
+        aligné sur le contrat models/ENGINE._parse_ff_value qui traite déjà
+        « — » comme absent (l.1318). Les ``*_value`` numériques restent None.
+  [F5]  ``content_hash`` = projection économique explicite 10 champs
+        (``economic_projection_v2``, méthode IDENTIQUE au macro) : insensible
+        au fuseau d'affichage, à l'ordre de fusion, au locale, aux champs de
+        vue. Avant ce port, changer DEFAULT_DISPLAY_TZ ou l'ordre des flux
+        changeait le hash — l'objectif « les deux apps voient le même
+        calendrier » était invérifiable. C'est la dette [F5] annoncée par
+        l'en-tête du calendar_layer macro (« à porter dans calendar_core.py »).
+  [F6]  parseur numérique : « 1,234 » = 1 234 et non 1.234 (facteur 1000 sur
+        NFP/retail sans suffixe) ; statut APPROXIMATE pour < > ~ ;
+        placeholders enrichis (« n.a. », « tentative »).
+  [F7]  ``day_of_week`` via table fixe (plus strftime("%A"), dépendant de la
+        locale du conteneur) ; ``_LEGACY_SESSION.get`` (plus KeyError si un
+        membre rejoint ``Session``) ; payload surdimensionné TRONQUÉ+averti
+        plutôt que ValueError → LKG périmé servi à la place d'un flux frais.
+  [M3]  ``forecast_status``/``previous_status`` exportés dans les lignes
+        (additif, ENGINE ignore les clés inconnues) + préfixes ≈ ≤ ≥ ± dans
+        ``_NUM_RE`` : les deux modules lisent le même vocabulaire.
+  [M4]  fenêtre d'ancrage conférence→décision par devise : JPY 240 min
+        (mesuré : BoJ décision 02:30Z, conférence 05:30Z = 180 min > 120 ;
+        la conférence BoJ n'était JAMAIS rattachée à sa décision) ; 120 min
+        ailleurs (FOMC 14:00→14:30 verrouillé par test).
+  [B8]  sessions ANZ : WELLINGTON (05:00-14:00 NZ) + SYDNEY (07:00-15:00 AU)
+        en heures locales DST-aware ; ``SESSION_POLICY_VERSION`` → v2. Cas
+        mesuré : GDP NZD mercredi 22:45Z = 10:45 Wellington / 08:45 Sydney,
+        cœur de séance étiqueté « OFF » par la table à trois places.
+  [compat-M2]  vocabulaire d'horizon exporté dans les métadonnées legacy,
+        strictement aligné sur le macro : ``feed_horizon_h`` /
+        ``feed_horizon_truncated`` (rouge SEULEMENT sur « degraded », jamais
+        sur le rollover hebdo normal — la philosophie ND-013 de ce fichier,
+        traduite dans les CLÉS que l'ENGINE lit déjà l.2851-2853) /
+        ``feed_horizon_state`` / ``feed_start_utc`` / ``feed_end_utc`` /
+        ``feed_coverage_detail`` / ``reachable`` (l'ENGINE lisait
+        ``meta.get("reachable", True)`` sur un fichier qui ne l'exportait
+        JAMAIS → fail-open permanent ; le flag est maintenant honnêtement
+        calculé, et ``serving_mode=last_known_good`` distingue le secours).
+  [compat-F7-hygiene]  ``events`` et ``events_engine`` ne sont plus le MÊME
+        objet list (un consommateur qui mute l'un corrompait l'autre).
+  [align-rows]  lignes legacy alignées sur le schema macro : +
+        release_group_type, datetime_display, display_timezone, actual_value,
+        priority (mêmes seuils 6h/48h, politique identique aux deux modules).
+
+Versions de contrat portées : CONTENT_HASH_METHOD « economic_projection_v2 »,
+SESSION_POLICY_VERSION « exchange_local_dst_aware_v2 »,
+NUMERIC_PARSER_VERSION « ff_numeric_v2 » — identiques au calendar_layer macro
+v6.2 (sha 2e4bf033a0c6). Fenêtre future : 192 h → 168 h (aligné macro [F7]
+« la fenêtre annoncée et la fenêtre servie sont la MÊME » ; mesuré, le flux
+thisweek n'atteint jamais 168 h hors dimanche : aucun événement retiré cette
+semaine — verrouillé par test croisé).
+=============================================================================
+
 Contrat public :
     SelectionPolicy      - politique machine, versionnée, indépendante de l'UI
     CalendarEvent        - événement normalisé, immuable (frozen)
@@ -17,12 +110,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
+import zoneinfo as _zoneinfo
 
 from pydantic import (
     BaseModel,
@@ -34,20 +129,78 @@ from pydantic import (
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
+# [B2 audit OPUS 15/09/2026] SOURCE D'AUTORITÉ DES RÈGLES TZ — À EXÉCUTER
+# AVANT TOUT ZoneInfo() DU MODULE.
+# PEP 615 : zoneinfo consulte TZPATH (les données SYSTÈME en premier) et ne
+# retombe sur le paquet PyPI `tzdata` qu'en l'absence de la zone. Le Maroc
+# passe définitivement à GMT le 20/09/2026 (règle encodée dans tzdata>=2026.3)
+# ; une image Debian/Alpine au tzdata système antérieur afficherait donc des
+# heures fausses DÈS LE 20 SEPTEMBRE malgré le pin pip. En en-tête de TZPATH,
+# le paquet épinglé devient la vérité observable, partout, reproductible.
+# Try/except : sans le paquet (Windows propre, env exotique), on reste sur le
+# comportement par défaut — tz_environment() le dira honnêtement.
+# ─────────────────────────────────────────────────────────────────────────────
+def _pin_pip_tzdata() -> None:
+    try:
+        import tzdata as _td
+        _d = os.path.join(os.path.dirname(_td.__file__), "zoneinfo")
+        if os.path.isdir(_d) and _d not in tuple(_zoneinfo.TZPATH):
+            _zoneinfo.TZPATH = (_d,) + tuple(_zoneinfo.TZPATH)
+    except Exception:                                       # noqa: BLE001
+        pass
+
+
+_pin_pip_tzdata()
+
+
+def tz_environment() -> Dict[str, Any]:
+    """Preuve forensique de la source des règles horaires, à journaliser au
+    démarrage ET dans health.json (audit OPUS B2) : version pip, tête de
+    TZPATH, et offsets Africa/Casablanca observés de part et d'autre de la
+    transition marocaine du 20/09/2026 — un décalage +01:00 le 21/09 trahit
+    des règles périmées, quelle que soit la machine."""
+    try:
+        import importlib.metadata as _md
+        pip_version = _md.version("tzdata")
+    except Exception:                                       # noqa: BLE001
+        pip_version = None
+    cas = ZoneInfo("Africa/Casablanca")
+    probe = {}
+    for label, d in (("2026-09-19", datetime(2026, 9, 19, 12, tzinfo=cas)),
+                     ("2026-09-21", datetime(2026, 9, 21, 12, tzinfo=cas)),
+                     ("2027-03-01", datetime(2027, 3, 1, 12, tzinfo=cas))):
+        probe[label] = (d.utcoffset().total_seconds() / 3600.0, d.tzname())
+    return {
+        "tzdata_pip_version": pip_version,
+        "tzpath_head": (str(_zoneinfo.TZPATH[0]) if len(_zoneinfo.TZPATH) else None),
+        "pip_tzdata_authoritative": bool(len(_zoneinfo.TZPATH)) and pip_version is not None
+        and str(_zoneinfo.TZPATH[0]).replace("\\", "/").endswith("tzdata/zoneinfo"),
+        "casablanca_offsets": probe,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # VERSIONS DE CONTRAT — toute rupture doit incrémenter la majeure
 # ─────────────────────────────────────────────────────────────────────────────
-SCHEMA_VERSION = "2.3.0"  # 2.3.0 : rollover hebdo neutre (ND-013) — COVERAGE_SHORTER_THAN_HORIZON + DEGRADED seulement si cause anormale ; flag meta week_rollover_pending
+SCHEMA_VERSION = "2.4.1"  # 2.4.1 : audit OPUS — invariant B1 (rejet total vocabulaire → INVALID), autorité tzdata pip (B2), hash de fusion multi-flux aligné sur la formule macro, coverage courte jugée sur EVENTS
+                          # 2.4.0 : PORT calendar_layer v6.1/v6.2 (F2/F3/F5/F6/F7/M3/M4/B8 + vocab horizon compatible) — voir en-tête
+                          # 2.3.0 : rollover hebdo neutre (ND-013) — COVERAGE_SHORTER_THAN_HORIZON + DEGRADED seulement si cause anormale ; flag meta week_rollover_pending
                           # 2.1.0 : ajout additif de CoverageInfo (aucune rupture v2.0.0)
 PAIR_MAPPING_METHOD = "static_currency_membership_v1"
-SESSION_POLICY_VERSION = "exchange_local_dst_aware_v1"
-NUMERIC_PARSER_VERSION = "ff_numeric_v1"
+SESSION_POLICY_VERSION = "exchange_local_dst_aware_v2"  # v2 : +WELLINGTON/SYDNEY (port B8)
+NUMERIC_PARSER_VERSION = "ff_numeric_v2"                # v2 : milliers + préfixes ≈≤≥± + APPROXIMATE (port F6/M3)
+CONTENT_HASH_METHOD = "economic_projection_v2"          # identique au calendar_layer macro [F5]
 
 UTC = timezone.utc
 
 TZ_LONDON = ZoneInfo("Europe/London")
 TZ_NEW_YORK = ZoneInfo("America/New_York")
 TZ_TOKYO = ZoneInfo("Asia/Tokyo")
-DEFAULT_DISPLAY_TZ = "Africa/Casablanca"
+# [F2 port] plus de fuseau figé : override BLUESTAR_DISPLAY_TZ. La VALEUR PAR
+# DÉFAUT reste celle de l'app TA (Africa/Casablanca) — aucun changement
+# visible ici ; ce qui change, c'est que le content_hash [F5] ne dépend plus
+# du fuseau et que l'app macro peut réconcilier ses vues avec les nôtres.
+DEFAULT_DISPLAY_TZ = os.environ.get("BLUESTAR_DISPLAY_TZ", "Africa/Casablanca")
 
 # Heures locales des places financières (politique explicite et versionnée).
 # On ne fige JAMAIS d'heures UTC : zoneinfo applique le DST de chaque place,
@@ -56,7 +209,24 @@ SESSION_HOURS = {
     "LONDON": (TZ_LONDON, 8 * 60, 16 * 60 + 30),
     "NEW_YORK": (TZ_NEW_YORK, 8 * 60, 17 * 60),
     "TOKYO": (TZ_TOKYO, 8 * 60, 17 * 60),
+    # [B8 port] places ANZ (mesuré : GDP NZD mercredi 22:45Z = 10:45
+    # Wellington / 08:45 Sydney — cœur de séance étiqueté « OFF » par la
+    # table à trois places). Heures LOCALES, DST appliquée par zoneinfo.
+    "WELLINGTON": (ZoneInfo("Pacific/Auckland"), 5 * 60, 14 * 60),
+    "SYDNEY": (ZoneInfo("Australia/Sydney"), 7 * 60, 15 * 60),
 }
+
+# [F7 port] table fixe : strftime("%A") dépend de la locale du conteneur
+# (« JEUDI » sur l'une, « THURSDAY » sur l'autre → même événement, deux
+# représentations). Index = weekday() (0 = lundi).
+_DAY_NAMES = ("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY",
+              "FRIDAY", "SATURDAY", "SUNDAY")
+
+
+def day_name(dt: datetime) -> str:
+    """Nom de jour ANGLAIS, majuscule, indépendant de la locale. Source
+    unique pour le core et l'app (qui recalcule une vue dérivée)."""
+    return _DAY_NAMES[dt.weekday()]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MATRICE PAIRES — dérivée mécaniquement, pas saisie à la main
@@ -186,7 +356,16 @@ def parse_source_datetime(raw: Any) -> datetime:
     return dt.astimezone(UTC)
 
 
-_NUM_RE = re.compile(r"^([<>~]?)\s*(-?\d+(?:[.,]\d+)?)\s*([KMBT]?)\s*(%?)$", re.IGNORECASE)
+_NUM_RE = re.compile(
+    # [M3 port] ≤ ≥ ± ≈ ajoutés : mêmes préfixes que le calendar_layer macro
+    # et que ENGINE._parse_ff_value côté lecture. Le flux FF actuel n'émet
+    # que < > ~ et nombres nus : zéro impact sur le contenu économique —
+    # verrouillé par test (parité avec le macro, sha calendar_layer
+    # 2e4bf033a0c6).
+    r"^([<>~≈≤≥±]?)\s*(-?[\d]+(?:[.,][\d]+)*)\s*([KMBT]?)\s*(%?)$", re.IGNORECASE
+)
+_THOUSANDS_COMMA = re.compile(r"^-?\d{1,3}(?:,\d{3})+$")
+_THOUSANDS_DOT = re.compile(r"^-?\d{1,3}(?:\.\d{3})+$")
 _SCALES = {"": 1.0, "K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
 
 
@@ -203,7 +382,42 @@ class NumericValue(BaseModel):
 
 
 ABSENT_NUMERIC = NumericValue()
-_PLACEHOLDERS = {"", "-", "—", "–", "n/a", "na", "null", "none"}
+# [F6/M3 port] placeholders alignés sur le calendar_layer macro (« n.a. »,
+# « tentative » en plus) — même vocabulaire ABSENT des deux côtés.
+_PLACEHOLDERS = {"", "-", "—", "–", "n/a", "n.a.", "na", "null", "none", "tentative"}
+ABSENT_DISPLAY = "—"      # [F3 port] placeholder unique des lignes legacy
+
+
+def _to_float(text: str) -> Optional[float]:
+    """[F6 port] Distingue séparateur de milliers et séparateur décimal.
+
+    Règles, dans l'ordre :
+      1. Les deux séparateurs présents → le DERNIER rencontré est le
+         décimal, l'autre est un séparateur de milliers ("1.234,5" → 1234.5,
+         "1,234.5" → 1234.5).
+      2. Un seul séparateur, en groupes de 3 exacts ("1,234", "12.345.678")
+         → séparateur de milliers.
+      3. Sinon → séparateur décimal ("1,5" → 1.5, "0.25" → 0.25).
+    Retourne ``None`` si non convertible (le caller émet UNPARSEABLE).
+    """
+    t = text.strip()
+    has_comma, has_dot = "," in t, "." in t
+    try:
+        if has_comma and has_dot:
+            if t.rfind(",") > t.rfind("."):
+                return float(t.replace(".", "").replace(",", "."))
+            return float(t.replace(",", ""))
+        if has_comma:
+            if _THOUSANDS_COMMA.match(t):
+                return float(t.replace(",", ""))
+            return float(t.replace(",", "."))
+        if has_dot:
+            if _THOUSANDS_DOT.match(t):
+                return float(t.replace(".", ""))
+            return float(t)
+        return float(t)
+    except ValueError:
+        return None
 
 
 def normalize_numeric(raw: Any) -> NumericValue:
@@ -233,11 +447,15 @@ def normalize_numeric(raw: Any) -> NumericValue:
     if not m:
         return NumericValue(raw=text, parse_status="UNPARSEABLE")
 
-    _prefix, number, suffix, pct = m.groups()
-    try:
-        base = float(number.replace(",", "."))
-    except ValueError:
+    prefix, number, suffix, pct = m.groups()
+    base = _to_float(number)                   # [F6] plus de float() brut
+    if base is None:
         return NumericValue(raw=text, parse_status="UNPARSEABLE")
+
+    # [F6 port] préfixe < > ~ ≈ ≤ ≥ ± → statut APPROXIMATE (la valeur est
+    # retenue, l'incertitude est NOMMÉE, pas silencieuse).
+    if prefix and status == "PARSED":
+        status = "APPROXIMATE"
 
     suffix = suffix.upper()
     if pct:
@@ -258,16 +476,20 @@ def classify_session(dt_utc: datetime) -> Tuple[Session, List[str]]:
         if start_min <= minutes < end_min:
             active.append(name)
 
-    has_ldn, has_ny, has_tky = ("LONDON" in active, "NEW_YORK" in active, "TOKYO" in active)
+    has_ldn = "LONDON" in active
+    has_ny = "NEW_YORK" in active
+    # [B8 port] Wellington/Sydney rejoignent le bloc asiatique : l'enum
+    # Session est inchangée, seuls les centres actifs s'enrichissent.
+    has_asia = bool({"TOKYO", "WELLINGTON", "SYDNEY"} & set(active))
     if has_ldn and has_ny:
         session = Session.OVERLAP_LONDON_NY
-    elif has_ldn and has_tky:
+    elif has_ldn and has_asia:
         session = Session.OVERLAP_ASIA_LONDON
     elif has_ny:
         session = Session.NEW_YORK
     elif has_ldn:
         session = Session.LONDON
-    elif has_tky:
+    elif has_asia:
         session = Session.ASIAN
     else:
         session = Session.OFF
@@ -303,7 +525,12 @@ class SelectionPolicy(BaseModel):
     currencies: Optional[Tuple[str, ...]] = None      # None = toutes
     include_global_events: bool = True
     window_past_hours: float = 72.0
-    window_future_hours: float = 192.0
+    # [F7 port] fenêtre servie == fenêtre annoncée == 168 h (watch horizon du
+    # macro). Avant : 192 annoncés / flux réel ~144 max → incohérence de
+    # fenêtre identique à celle corrigée côté macro (mesuré 15/09 : le flux
+    # thisweek n'atteint 168 h AUCUN jour de la semaine → aucun événement
+    # retiré par ce changement, verrouillé par test croisé).
+    window_future_hours: float = 168.0
     imminent_hours: float = 6.0
     soon_hours: float = 48.0
     display_timezone: str = DEFAULT_DISPLAY_TZ
@@ -438,6 +665,12 @@ class SourceInfo(BaseModel):
     # (root « source » déjà exclu) : la disponibilité variable d'un flux
     # supplémentaire ne doit pas faire dériver le hash économique.
     feed_status: Dict[str, str] = Field(default_factory=dict)
+    # [audit OPUS] sha256 DES OCTETS par flux composant la fusion (« thisweek »,
+    # « nextweek ») — payload_sha256 ci-dessus étant désormais l'agrégat à la
+    # formule macro, cette carte conserve la traçabilité par flux d'origine.
+    # Exclue du content_hash (racine « source » exclue par [F5]) : un flux
+    # supplémentaire ou son indisponibilité ne déplacent pas le hash économique.
+    feed_sha256: Dict[str, str] = Field(default_factory=dict)
 
     @field_serializer("fetched_at_utc")
     def _ser(self, v: datetime, _info) -> str:
@@ -531,6 +764,11 @@ _RATE_KEYWORDS = (
     "federal funds", "bank rate", "fomc statement",
 )
 _PRESSER_KEYWORDS = ("press conference", "monetary policy press")
+# [M4 port] fenêtre d'antériorité conférence→décision PAR DEVISE. Mesuré :
+# BoJ décision 02:30Z, conférence 05:30Z = écart 180 min > 120 → la
+# conférence n'était jamais rattachée à sa décision côté TA comme côté
+# macro avant correctif. 120 min partout ailleurs (FOMC 14:00→14:30).
+_PRESSER_ANCHOR_WINDOW_MIN: Dict[str, float] = {"JPY": 240.0}
 _LABOR_KEYWORDS = (
     "non-farm employment change", "unemployment rate", "average hourly earnings",
     "employment change", "claimant count",
@@ -547,7 +785,8 @@ def assign_release_groups(rows: List[Dict[str, Any]]) -> None:
     Groupe (mutation in place de la clé 'release_group_*') :
       1. publications strictement simultanées d'un même pays,
       2. conférence de presse rattachée à la décision de taux du même pays
-         survenue dans les 120 minutes précédentes.
+         survenue dans la fenêtre [_PRESSER_ANCHOR_WINDOW_MIN] (120 min par
+         défaut, JPY 240 min — port [M4] du calendar_layer macro v6.1).
     """
     buckets: Dict[Tuple[str, datetime], List[Dict[str, Any]]] = {}
     for row in rows:
@@ -567,7 +806,9 @@ def assign_release_groups(rows: List[Dict[str, Any]]) -> None:
 
         if is_presser and ccy in anchors:
             anchor_time, anchor_gid = anchors[ccy]
-            if timedelta(0) <= (when - anchor_time) <= timedelta(minutes=120):
+            # [M4 port] fenêtre par devise : JPY 240 min, 120 ailleurs.
+            window_min = _PRESSER_ANCHOR_WINDOW_MIN.get(ccy, 120.0)
+            if timedelta(0) <= (when - anchor_time) <= timedelta(minutes=window_min):
                 gid, gtype = anchor_gid, ReleaseGroupType.CENTRAL_BANK_DECISION
 
         if gid is None and (is_cb or len(members) > 1):
@@ -583,6 +824,38 @@ def assign_release_groups(rows: List[Dict[str, Any]]) -> None:
         for m in members:
             m["release_group_id"] = gid
             m["release_group_type"] = gtype
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROJECTION « PRIORITY » + PLACEHOLDER D'AFFICHAGE — portés du macro
+# [M3/F3] pour que les deux apps exportent la MÊME sémantique de ligne.
+# ─────────────────────────────────────────────────────────────────────────────
+PRIORITY_PAST = "PAST"
+PRIORITY_CRITICAL = "CRITICAL"
+PRIORITY_HIGH = "HIGH"
+PRIORITY_MEDIUM = "MEDIUM"
+
+
+def compute_priority(hours_until: float,
+                     policy: SelectionPolicy = DEFAULT_POLICY) -> str:
+    """Règle IDENTIQUE au calendar_layer macro (seuils = time_proximity :
+    imminent 6 h / soon 48 h, communs aux deux politiques). Additif dans la
+    ligne legacy : l'ENGINE lit « priority » en audit seulement (l.339,
+    extra="ignore") — aucun verdict de blackout n'en dépend côté desk."""
+    if hours_until <= 0:
+        return PRIORITY_PAST
+    if hours_until <= policy.imminent_hours:
+        return PRIORITY_CRITICAL
+    if hours_until <= policy.soon_hours:
+        return PRIORITY_HIGH
+    return PRIORITY_MEDIUM
+
+
+def _disp(nv: NumericValue) -> Optional[str]:
+    """[F3 port] placeholder unique « — » pour les lignes legacy, aligné
+    models.from_enriched et ENGINE._parse_ff_value (qui traite déjà « — »
+    comme absent). La valeur numérique brute reste dans ``*_value``."""
+    return nv.raw if nv.raw is not None else ABSENT_DISPLAY
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -611,8 +884,7 @@ def compute_time_context(
         proximity = TimeProximity.LATER
 
     return TimeContext(
-        computed_at_utc=now_utc,
-        hours_until=round(hours, 4),
+        computed_at_utc=now_utc,        hours_until=round(hours, 4),
         hours_until_display=fmt_until(hours),
         is_upcoming=hours > 0,
         time_proximity=proximity,
@@ -673,7 +945,7 @@ def _normalize_row(
         "display_timezone": policy.display_timezone,
         "date_utc": when.strftime("%Y-%m-%d"),
         "date_display": local.strftime("%Y-%m-%d"),
-        "day_of_week": local.strftime("%A").upper(),
+        "day_of_week": day_name(local),            # [F7 port] locale-safe
         "impact": impact,
         "session": None,
         "active_market_centers": None,
@@ -731,11 +1003,17 @@ def build_payload(
     """Transforme le payload brut en artefact canonique validé."""
     if not isinstance(raw_list, list):
         raise ValueError(f"source root must be a JSON array, got {type(raw_list).__name__}")
-    if len(raw_list) > policy.max_events:
-        raise ValueError(f"payload too large: {len(raw_list)} > {policy.max_events}")
+    # [F7 port] volume hors-norme : TRONCATURE + avertissement (flux frais
+    # amputé du surplus) plutôt que ValueError → ingestor → LKG périmé servi
+    # à la place d'un flux vivant. Choix identique au calendar_layer macro.
+    _oversized = len(raw_list) > policy.max_events
+    if _oversized:
+        raw_list = list(raw_list[: policy.max_events])
 
     display_tz = policy.display_tz()
     warnings: List[str] = []
+    if _oversized:
+        warnings.append(f"RAW_PAYLOAD_TRUNCATED_TO_{policy.max_events}")
     rejections: List[str] = []
     rows: List[Dict[str, Any]] = []
 
@@ -749,6 +1027,16 @@ def build_payload(
     unknown = {r["impact"] for r in rows if r["impact"] is Impact.UNKNOWN}
     if unknown:
         warnings.append("SOURCE_IMPACT_VOCABULARY_CHANGED")
+        # [B1 audit OPUS] Pénalité : la dérive de vocabulaire n'est jamais
+        # neutre. Partielle → score 0.80 → DEGRADED (la conjonction quality
+        # teste score < 0.85). Totale (tous les candidats retenables devenus
+        # UNKNOWN) → INVALID explicite plus bas. Sans ceci, un renommage
+        # amont « High → Critical » produisait un calendrier VIDE noté
+        # VALID 1.000 (mesuré 15/09/2026 sur le flux réel : 105 lignes
+        # normalisées, 0 événement, quality VALID).
+        score_vocab_penalty = 0.2
+    else:
+        score_vocab_penalty = 0.0
 
     lo = now_utc - timedelta(hours=policy.window_past_hours)
     hi = now_utc + timedelta(hours=policy.window_future_hours)
@@ -823,8 +1111,21 @@ def build_payload(
     # promet (soon_hours = la fenêtre de veille du consommateur). Sans ce
     # warning, seul un rollover complet (coverage_end < now) sonnait, et le
     # run de jeudi à 44 h de couverture passait pour un flux sain.
+    # [Câblage audit OPUS 15/09] La couverture qui COMPTE est celle des
+    # événements RETENUS (events), pas de toutes les lignes normalisées :
+    # l'aval lit data_coverage_end_utc = max(events). Baser le warning sur
+    # max(rows) (LOW/Holiday inclus) le faisait sonner ~24 h trop tard
+    # (mesuré 15/09 : rows-end ECOFIN 19/09 10:15Z vs events-end 18/09
+    # 10:30Z = 23,75 h d'angle mort). Repli sur rows si events vide (semaine
+    # calme = cas où l'horizon des events n'a rien à mesurer).
+    _horizon_times = [e.scheduled_at_utc for e in events] or all_times
+    _horizon_end = max(_horizon_times) if _horizon_times else None
+    horizon_events_h = (
+        (_horizon_end - now_utc).total_seconds() / 3600.0
+        if _horizon_end is not None and _horizon_end > now_utc else None
+    )
     coverage_short = bool(
-        horizon_useful_h is not None and horizon_useful_h < policy.soon_hours
+        horizon_events_h is not None and horizon_events_h < policy.soon_hours
     )
     # [ND-013] Deux causes d'horizon court, deux traitements (sémantique
     # IDENTIQUE à la macro v6.1 — classification classify_feed_horizon) :
@@ -847,7 +1148,7 @@ def build_payload(
         rollover_pending = True
     if coverage_short and not rollover_pending:
         warnings.append(
-            f"COVERAGE_SHORTER_THAN_HORIZON:{horizon_useful_h:.1f}h<{policy.soon_hours:.0f}h")
+            f"COVERAGE_SHORTER_THAN_HORIZON:{horizon_events_h:.1f}h<{policy.soon_hours:.0f}h")
     if not rows:
         warnings.append("EMPTY_NORMALIZED_PAYLOAD")
 
@@ -858,13 +1159,25 @@ def build_payload(
         score -= 0.25
     if rejections:
         score -= min(0.25, 0.05 * len(rejections))
+    score -= score_vocab_penalty                      # [B1 audit OPUS]
     if "ALL_SOURCE_EVENTS_IN_THE_PAST_WEEK_ROLLOVER_PENDING" in warnings:
         score -= 0.30
     if not rows:
         score = 0.0
     score = round(max(0.0, min(1.0, score)), 3)
 
-    if not rows or score < 0.4 or lkg_expired:
+    # [B1 audit OPUS] Rejet TOTAL par dérive de vocabulaire : des lignes ont
+    # survécu à la normalisation mais AUCUN événement n'est retenu, et le
+    # warning de vocabulaire est là pour l'attester. C'est le seul cas
+    # « vide = artefact de parsing » ; une semaine calme sans High (aucun
+    # UNKNOWN) reste un fait de marché publiable, avec ses garde-fous
+    # existants (F-3 devise côté moteur, coverage, rollover).
+    total_vocab_rejection = bool(rows) and not events \
+        and "SOURCE_IMPACT_VOCABULARY_CHANGED" in warnings
+    if total_vocab_rejection:
+        warnings.append("IMPACT_VOCABULARY_ALL_REJECTED")
+
+    if not rows or score < 0.4 or lkg_expired or total_vocab_rejection:
         status = QualityStatus.INVALID
     elif warnings and (is_stale or source.from_last_known_good
                        or (coverage_short and not rollover_pending)
@@ -901,24 +1214,45 @@ def build_payload(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HASH DE CONTENU — insensible aux champs volatils
+# HASH DE CONTENU — [F5 port] PROJECTION ÉCONOMIQUE EXPLICITE
+# (méthode « economic_projection_v2 », identique au calendar_layer macro :
+# mêmes champs, même sérialisation → même calendrier, même hash, quel que
+# soit le fuseau d'affichage, la locale, l'ordre de fusion ou l'horloge.)
 # ─────────────────────────────────────────────────────────────────────────────
-_VOLATILE_EVENT_FIELDS = ("time_context",)
-_VOLATILE_ROOT_FIELDS = ("generated_at_utc", "content_hash", "source", "quality", "coverage")
 
 
 def canonical_content_hash(payload: CalendarPayload) -> str:
+    """[F5 port] SHA-256 d'une PROJECTION ÉCONOMIQUE explicite.
+
+    Insensible à : fuseau d'affichage, jour en toutes lettres (locale),
+    index d'origine dans le flux, sessions/centres actifs (dérivables de
+    l'UTC), champs de vue (time_context, priority…), métadonnées de qualité
+    et de source. Avant ce port, changer DEFAULT_DISPLAY_TZ ou l'ordre de
+    fusion faisait bouger le hash — « les deux apps voient le même
+    calendrier » était invérifiable. La liste des 10 champs est la copie
+    exacte de la projection du calendar_layer macro (l. canonical_content_
+    hash, v6.2 sha 2e4bf033a0c6) ; la stabilité inter-apps du BRUT reste
+    ``source.payload_sha256``.
     """
-    SHA-256 du contenu économique seul. Deux runs successifs sur des données
-    identiques produisent le MÊME hash, même à des secondes différentes.
-    """
-    dumped = payload.model_dump(mode="json")
-    for field in _VOLATILE_ROOT_FIELDS:
-        dumped.pop(field, None)
-    for event in dumped.get("events", []):
-        for field in _VOLATILE_EVENT_FIELDS:
-            event.pop(field, None)
-    canonical = json.dumps(dumped, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    projection = [
+        {
+            "occurrence_id": e.occurrence_id,
+            "event_type_id": e.event_type_id,
+            "scheduled_at_utc": iso_z(e.scheduled_at_utc),
+            "currency": e.currency,
+            "name": e.name,
+            "impact": e.impact.value,
+            "forecast": e.forecast.raw,
+            "previous": e.previous.raw,
+            "actual": e.actual.raw,
+            "release_group_id": e.release_group_id,
+        }
+        for e in payload.events
+    ]
+    canonical = json.dumps(
+        {"method": CONTENT_HASH_METHOD, "events": projection},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
     return "sha256:" + sha256_hex(canonical)
 
 
@@ -973,6 +1307,33 @@ _LEGACY_SESSION = {
 }
 
 
+def _horizon_diagnosis(feed_horizon_h: Optional[float],
+                       feed_status: Dict[str, Any],
+                       watch_horizon_h: float) -> Tuple[str, bool]:
+    """[compat-M2 port] Copie sémantique exacte du ``_horizon_diagnosis`` du
+    calendar_layer macro (v6.1) : « flux normalement court » != « flux
+    réellement dégradé ».
+
+    Retourne ``(state, alerte_rouge)`` :
+      * ("unreachable", False)     — horizon non mesurable (flux vide) ;
+      * ("degraded", True)         — thisweek en échec (seul cas rouge) ;
+      * ("nominal_weekly", False)  — thisweek ok, horizon < watch : nature
+        hebdomadaire de la source (mention neutre, pas d'alerte) ;
+      * ("full_watch_horizon", False) — ≥ watch horizon (second flux publié).
+
+    ``feed_status`` vide (payload injecté, tests/rejeu) : donnée de confiance,
+    pas de dégradation affirmée.
+    """
+    if feed_horizon_h is None:
+        return "unreachable", False
+    tw = str((feed_status or {}).get("thisweek") or "")
+    if feed_status and tw and not tw.startswith("ok"):
+        return "degraded", True
+    if feed_horizon_h < watch_horizon_h:
+        return "nominal_weekly", False
+    return "full_watch_horizon", False
+
+
 def to_legacy_payload(payload: CalendarPayload, now_utc: datetime) -> Dict[str, Any]:
     """
     Reproduit la forme v1 (metadata / events / events_engine / summary_by_day)
@@ -1007,25 +1368,41 @@ def to_legacy_payload(payload: CalendarPayload, now_utc: datetime) -> Dict[str, 
             "occurrence_id": e.occurrence_id,
             "event_type_id": e.event_type_id,
             "release_group_id": e.release_group_id,
+            # [align-rows] type de groupe exporté (le macro l'expose ; additif
+            # pour l'ENGINE, extra="ignore").
+            "release_group_type": (e.release_group_type.value
+                                   if e.release_group_type else None),
             "currency": e.currency,
             "event_name": e.name,
             "datetime_utc": iso_z(e.scheduled_at_utc),
             "date_display": e.date_display,
             "time_display": f"{e.scheduled_at_display.strftime('%H:%M')} ({e.display_timezone})",
+            "datetime_display": (f"{e.date_display} · "
+                                 f"{e.scheduled_at_display.strftime('%H:%M')} ({e.display_timezone})"),
+            "display_timezone": e.display_timezone,
             "day_of_week": e.day_of_week,
             "impact": e.impact.value.lower(),
-            "forecast": e.forecast.raw,
+            # [F3 port] placeholder « — » commun aux trois valeurs ; les
+            # *_value numériques restent None quand absent (contrat ENGINE).
+            "forecast": _disp(e.forecast),
             "forecast_value": e.forecast.value,
-            "previous": e.previous.raw,
+            # [M3 port] statut de parsing exporté (additif, consommé par les
+            # diagnostics ; jamais par un verdict).
+            "forecast_status": e.forecast.parse_status,
+            "previous": _disp(e.previous),
             "previous_value": e.previous.value,
-            "actual": e.actual.raw,
+            "previous_status": e.previous.parse_status,
+            "actual": _disp(e.actual),
+            "actual_value": e.actual.value,
             "actual_status": e.actual_status.value,
             "hours_until": ctx.hours_until,
+            # [align-rows] projection priority (mêmes seuils que le macro).
+            "priority": compute_priority(ctx.hours_until, payload.selection_policy),
             "hours_until_display": ctx.hours_until_display,
             "is_upcoming": ctx.is_upcoming,
             "time_proximity": ctx.time_proximity.value,
             "status": ctx.status.value,
-            "session": _LEGACY_SESSION[e.session],
+            "session": _LEGACY_SESSION.get(e.session, e.session.value),  # [F7 port]
             "session_v2": e.session.value,
             "pairs_affected": list(e.pairs_with_currency_exposure),
             "pair_mapping_status": e.pair_mapping_status.value,
@@ -1038,11 +1415,52 @@ def to_legacy_payload(payload: CalendarPayload, now_utc: datetime) -> Dict[str, 
     data_horizon_h = (round((data_end - payload.generated_at_utc).total_seconds() / 3600.0, 2)
                       if data_end else None)
 
+    # [compat-M2 port] diagnostic d'horizon dans le VOCABULAIRE que l'ENGINE
+    # lit déjà (feed_horizon_h / feed_horizon_truncated / feed_coverage_detail,
+    # ENGINE.V10 l.2851-2853) — sémantique identique au calendar_layer macro :
+    # rouge UNIQUEMENT sur « degraded » (thisweek en échec), jamais sur le
+    # rollover hebdo normal (la position ND-013 de ce fichier, traduite).
+    _fstat = dict(payload.source.feed_status or {})
+    _feeds_ok = sum(1 for v in _fstat.values() if str(v).startswith("ok"))
+    _reachable = (not payload.source.from_last_known_good) and (
+        _feeds_ok > 0 if _fstat else True)
+    if not _reachable:
+        _hstate, _hred = ("unreachable", False) if payload.source.from_last_known_good \
+            else _horizon_diagnosis(data_horizon_h, _fstat,
+                                    payload.selection_policy.window_future_hours)
+    else:
+        _hstate, _hred = _horizon_diagnosis(data_horizon_h, _fstat,
+                                            payload.selection_policy.window_future_hours)
+
+    _cov_note = (
+        (render_coverage_note(payload.coverage, payload.selection_policy.impact_levels) or "")
+        + (" Rollover hebdomadaire en attente : flux semaine suivante non publié "
+           "(publication en fin de semaine) — couverture réelle jusqu'au "
+           + str(iso_z(data_end) if data_end else "—")
+           + " ; au-delà, silence non mesuré, pas risque nul."
+           if payload.quality.week_rollover_pending else "")
+    ).strip() or None
+
     return {
         "metadata": {
             "schema_version": f"legacy-1.2.0+core-{payload.schema_version}",
             "generated_at_utc": iso_z(payload.generated_at_utc),
             "content_hash": payload.content_hash,
+            # [F5 port] méthode + [compat-M2] vocab d'horizon lisible par
+            # l'ENGINE (l.2850-2853) — avant ce port, « reachable » n'était
+            # JAMAIS exporté et l'ENGINE vivait sur son défaut True
+            # (fail-open) ; « serving_mode » distingue le secours LKG.
+            "content_hash_method": CONTENT_HASH_METHOD,
+            "reachable": _reachable,
+            "feeds_ok": _feeds_ok,
+            "feeds_total": len(_fstat),
+            "feed_horizon_h": data_horizon_h,
+            "feed_horizon_state": _hstate,
+            "feed_horizon_truncated": _hred,
+            "feed_watch_horizon_h": payload.selection_policy.window_future_hours,
+            "feed_start_utc": iso_z(data_start) if data_start else None,
+            "feed_end_utc": iso_z(data_end) if data_end else None,
+            "feed_coverage_detail": _cov_note,
             "source": payload.source.provider,
             "source_url": payload.source.url,
             "fetched_at_utc": iso_z(payload.source.fetched_at_utc),
@@ -1109,16 +1527,13 @@ def to_legacy_payload(payload: CalendarPayload, now_utc: datetime) -> Dict[str, 
             "currencies_covered": list(payload.coverage.currencies_covered),
             "currencies_excluded_by_policy": list(payload.coverage.currencies_excluded_by_policy),
             "currencies_no_data_in_source": list(payload.coverage.currencies_no_data_in_source),
-            "coverage_note": (
-                (render_coverage_note(payload.coverage, payload.selection_policy.impact_levels) or "")
-                + (" Rollover hebdomadaire en attente : flux semaine suivante non publié "
-                   "(publication en fin de semaine) — couverture réelle jusqu'au "
-                   + str(iso_z(data_end) if data_end else "—")
-                   + " ; au-delà, silence non mesuré, pas risque nul."
-                   if payload.quality.week_rollover_pending else "")
-            ).strip() or None,
+            "coverage_note": _cov_note,
         },
-        "events": rows,
-        "events_engine": rows,
+        # [M5 port] les deux clés ne partagent plus le MÊME objet list : un
+        # consommateur qui en mute une ne corrompt plus l'autre. Contenu
+        # identique (Pro publie la population complète ; c'est l'ENGINE qui
+        # applique sa fenêtre de lecture).
+        "events": list(rows),
+        "events_engine": list(rows),
         "summary_by_day": {k: summary[k] for k in sorted(summary)},
     }

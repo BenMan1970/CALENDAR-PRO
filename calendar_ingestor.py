@@ -47,6 +47,7 @@ from calendar_core import (
     iso_z,
     sha256_hex,
     to_legacy_payload,
+    tz_environment,
 )
 
 UTC = timezone.utc
@@ -195,6 +196,18 @@ def _release_publish_lock(data_dir: Path) -> None:
             lp.unlink()
     except OSError:
         pass
+
+
+def publish_lock_held(data_dir: Path) -> bool:
+    """[B3 audit OPUS] Sonde LECTURE SEULE : le verrou d'édition est-il tenu
+    par un producteur vivant (_mtime sous le plafond de vol) ? Permet à l'UI
+    et au CLI de distinguer « un autre producteur works » (rien d'anormal)
+    d'un échec d'ingestion — les deux retournaient None jusque-là."""
+    lp = _lock_path(data_dir)
+    try:
+        return (time.time() - lp.stat().st_mtime) < LOCK_STEAL_AFTER_S
+    except OSError:
+        return False
 
 
 def _rotate_raw(raw_dir: Path, keep: int) -> int:
@@ -420,7 +433,7 @@ def write_health(data_dir: Path, state: IngestorState, now: datetime,
         status = payload.quality.status.value
 
     atomic_write_json(data_dir / "health.json", {
-        "schema_version": "health-1.0.0",
+        "schema_version": "health-1.1.0",
         "core_schema_version": SCHEMA_VERSION,
         "status": status,
         "checked_at_utc": iso_z(now),
@@ -437,6 +450,16 @@ def write_health(data_dir: Path, state: IngestorState, now: datetime,
         "data_quality_score": payload.quality.data_quality_score if payload else 0.0,
         "warnings": list(payload.quality.warnings) if payload else [],
         "last_error": error or state.last_error,
+        # [audit OPUS] le health.json devient auto-suffisant pour le diagnostic
+        # croisé cron-vs-app : où sont les artefacts, ce que la source a dit,
+        # et quelles RÈGLES horaires sont actives (transition marocaine
+        # 20/09/2026 : un offset +01 le 21/09 dans ce bloc = tzdata périmé).
+        "data_dir": str(data_dir),
+        "week_rollover_pending": bool(payload.quality.week_rollover_pending) if payload else None,
+        "coverage": payload.coverage.model_dump(mode="json") if payload and payload.coverage else None,
+        "feeds_status": dict(payload.source.feed_status) if payload else {},
+        "feed_sha256": dict(payload.source.feed_sha256) if payload else {},
+        "tz": tz_environment(),
     })
 
 
@@ -475,14 +498,36 @@ def _run_once_impl(data_dir: Path, policy: SelectionPolicy, session: requests.Se
             raw_list, meta = fetch_source(session, SOURCE_URL)
             feed_status["thisweek"] = "ok"
             state.record_success(now)
+            # [audit OPUS] ETag/Last-Modified sont PERSISTÉS À TITRE
+            # D'OBSERVATION seulement. Un conditional GET n'est PAS branché :
+            # envoyer If-None-Match sans gérer le 304 transformerait un
+            # « inchangé » en INVALID_JSON (corps vide), et le gérer
+            # correctement exige rejouer le corps depuis un cache — faux
+            # sentiment de fraîcheur sur fetched_at. Ne pas activer sans un
+            # chemin complet 304 → re-publication horodatée. (Dormant, donc
+            # inerte — l'app ne demande jamais qu'on lui envoie un 304.)
             state.etag = meta.get("etag")
             state.last_modified = meta.get("last_modified")
+            # [câblage audit OPUS] Provenance de la FUSION préservée :
+            # nextweek était fusionné sans que son hash ni ses octets ne
+            # soient tracés — payload_sha256 ne couvrait que thisweek alors
+            # que le LKG, lui, stockait le fusionné. L'hash agrégé reprend la
+            # FORMULE EXACTE du calendar_layer macro (sha256 de la
+            # concaténation « | » des sha par flux ok, dans l'ordre
+            # thisweek→nextweek) : deux apps, mêmes bruts, même signature.
+            feed_shas: Dict[str, str] = {"thisweek": str(meta.get("payload_sha256"))}
+            total_bytes = int(meta.get("payload_bytes") or 0)
+            next_body: Optional[bytes] = None
             if SOURCE_URL_NEXT:
                 try:
                     extra_rows, extra_meta = fetch_source(session, SOURCE_URL_NEXT)
                     if isinstance(extra_rows, list):
                         raw_list = list(raw_list) + extra_rows
                         feed_status["nextweek"] = "ok"
+                        feed_shas["nextweek"] = str(extra_meta.get("payload_sha256"))
+                        total_bytes += int(extra_meta.get("payload_bytes") or 0)
+                        nb = extra_meta.get("raw_bytes")
+                        next_body = nb if isinstance(nb, bytes) else None
                     else:
                         feed_status["nextweek"] = "schema_root_not_array"
                 except FetchError as exc_next:
@@ -493,10 +538,16 @@ def _run_once_impl(data_dir: Path, policy: SelectionPolicy, session: requests.Se
                     else:
                         feed_status["nextweek"] = f"error:{code_next}"
                         LOG.warning("nextweek fetch failed (bonus feed, breaker intact): %s", exc_next)
+            ordered_shas = [feed_shas[k] for k in ("thisweek", "nextweek") if k in feed_shas]
+            meta["feed_sha256"] = feed_shas
+            meta["payload_sha256"] = "sha256:" + sha256_hex("|".join(ordered_shas))
+            meta["payload_bytes"] = total_bytes
             raw_bytes = meta.pop("raw_bytes")
             meta["feed_status"] = dict(feed_status)
-            atomic_write_bytes(data_dir / "raw" / f"raw_{now.strftime('%Y%m%dT%H%M%SZ')}.json",
-                               raw_bytes)
+            _ts = now.strftime('%Y%m%dT%H%M%SZ')
+            atomic_write_bytes(data_dir / "raw" / f"raw_{_ts}_thisweek.json", raw_bytes)
+            if next_body is not None:
+                atomic_write_bytes(data_dir / "raw" / f"raw_{_ts}_nextweek.json", next_body)
             # Le cache est écrit APRÈS la fusion : un resservi LKG rejoue exactly
             # le même contenu (events + statuts de flux) que l'artefact publié.
             atomic_write_bytes(lkg_path, json.dumps({
@@ -554,6 +605,7 @@ def _run_once_impl(data_dir: Path, policy: SelectionPolicy, session: requests.Se
         supports_actual=any(isinstance(r, dict) and "actual" in r for r in raw_list),
         from_last_known_good=from_lkg,
         feed_status=dict(meta.get("feed_status") or {}),
+        feed_sha256=dict(meta.get("feed_sha256") or {}),
     )
 
     try:
@@ -629,6 +681,11 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--log-level", default=os.getenv("BLUESTAR_LOG_LEVEL", "INFO"))
     args = parser.parse_args(argv)
 
+    # [logs audit OPUS] datefmt promet un suffixe « Z » ; asctime par défaut
+    # suit la locale — un cron sous UTC+1 écrivait « …:14:33Z » pour 13:33Z.
+    # Convertir le formatter en gmtime rend l'horodatage conforme à sa
+    # promesse, sur toute plateforme.
+    logging.Formatter.converter = time.gmtime
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format='{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s",'
@@ -640,18 +697,29 @@ def main(argv: Optional[list] = None) -> int:
         impact_levels=tuple(i.upper() for i in args.impact),
         display_timezone=args.display_tz,
     )
-    session = build_session()
     args.data_dir.mkdir(parents=True, exist_ok=True)
+    # [câblage audit OPUS] le chemin RÉSOLU est journalisé : deux lanceurs
+    # qui ne partagent pas le même DATA_DIR doivent pouvoir être confondus
+    # en lisant les logs, pas devinés après coup.
+    LOG.info("ingestor data_dir=%s | tz=%s", args.data_dir.resolve(),
+             tz_environment())
 
     if not args.loop or args.once:
-        return 0 if run_once(args.data_dir, policy, session) else 2
+        # [B4 audit OPUS] session par cycle : un worker abandonné par le
+        # plafond H7 ne peut plus marcher sur la session partagée du suivant.
+        # [B3 audit OPUS] verrou occupé ≠ échec : code de sortie 3 distinct,
+        # un superviseur cron ne doit pas alerter parce que Streamlit ingère.
+        res = run_once(args.data_dir, policy, build_session())
+        if res is not None:
+            return 0
+        return 3 if publish_lock_held(args.data_dir) else 2
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
     while not _STOP:
         cycle_start = time.monotonic()
         try:
-            run_once(args.data_dir, policy, session)
+            run_once(args.data_dir, policy, build_session())
         except Exception:                                       # noqa: BLE001
             LOG.exception("unhandled error in ingest cycle")
         sleep_for = max(5.0, args.interval - (time.monotonic() - cycle_start))

@@ -107,6 +107,7 @@ def test_lkg_served_on_primary_failure_then_expired_is_refused(tmp_path, monkeyp
     assert payload.quality.status is QualityStatus.DEGRADED
     served = json.loads(legacy_path.read_text(encoding="utf-8"))
     assert served["metadata"]["serving_mode"] == "last_known_good"
+    cycle2_bytes = legacy_path.read_bytes()
 
     # 3) on rajeunit facticement l'horodatage du cache à 49 h → plafond dur
     cache_path = tmp_path / "raw" / "last_known_good.json"
@@ -116,8 +117,12 @@ def test_lkg_served_on_primary_failure_then_expired_is_refused(tmp_path, monkeyp
 
     _installer(monkeypatch, primary=ci.FetchError("HTTP_ERROR", "status=503"))
     assert ci.run_once(tmp_path, SelectionPolicy(), None) is None
-    assert legacy_path.read_bytes() == first_bytes or \
-        json.loads(legacy_path.read_text(encoding="utf-8"))["metadata"]["serving_mode"] == "last_known_good"
+    # [audit OPUS] avant correction, l'assertion portait un « or » tautolo-
+    # gique : le second membre était vrai PAR CONSTRUCTION (l'artefact sur
+    # disque étant précisément celui publié au cycle 2, marqués LKG), donc
+    # la disjonction ne testait plus rien. Exigence réelle, now asserted
+    # directly : le refus sur expiration n'a RIEN écrit — octet pour octet.
+    assert legacy_path.read_bytes() == cycle2_bytes
     # L'artefact sur disque n'a PAS été rajeuni par un ressassement expiré :
     # son generated_at_utc reste celui du dernier publish légitime.
     on_disk = json.loads(legacy_path.read_text(encoding="utf-8"))
@@ -220,18 +225,51 @@ def test_h3_run_once_skips_when_locked(tmp_path, monkeypatch):
     assert ci.run_once(tmp_path, SelectionPolicy(), None) is not None
 
 
+class _BytesResponse:
+    def __init__(self, body: bytes):
+        self._b = body
+        self.status_code = 200
+        self.headers = {"Content-Type": "application/json"}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def iter_content(self, chunk_size=65536):
+        yield self._b
+
+
+class _BytesSession:
+    def __init__(self, body: bytes):
+        self._b = body
+
+    def get(self, url, timeout=None, stream=False):
+        return _BytesResponse(self._b)
+
+
 def test_h4_payload_hash_is_of_real_bytes():
-    """Deux volets : (a) pour tout corps UTF-8 valide, l'ancien et le nouveau
-    chemin donnent la MÊME valeur (aucune dérive de hash entre versions) ;
-    (b) le code source utilise bien le hash des octets, plus le décodage
-    destructif errors='replace' (verrou textuel du correctif H4)."""
+    """(a) invariance mathématique : pour tout corps UTF-8 valide, l'ancien
+    et le nouveau chemin donnent la MÊME valeur.
+    (b) [audit OPUS] VERROU COMPORTEMENTAL — la version précédente vérifiait
+    par grep sur le texte source (« 'hashlib.sha256(body)' in src »), qui
+    survit à n'importe quel refactoring du calcul tant que la ligne littérale
+    reste, et ne prouve RIEN du comportement observable. Ici : octets valides
+    → le hash publié est le sha256 des OCTETS et les octets sont archivés
+    intacts ; octets non décodables → le fetch EST REFUSÉ (INVALID_JSON) —
+    avant H4, un décodage errors='replace' eût publié du corrompu masqué."""
     import hashlib
     from calendar_core import sha256_hex
     good = b'[{"title":"OK","impact":"High"}]'
     assert sha256_hex(good.decode("utf-8")) == hashlib.sha256(good).hexdigest()
-    src = open(ci.__file__, encoding="utf-8").read()
-    assert 'hashlib.sha256(body).hexdigest()' in src
-    assert 'errors="replace"' not in src.split("payload_sha256")[1][:200]
+    rows, meta = ci.fetch_source(_BytesSession(good), "https://x.invalid/feed.json")
+    assert meta["payload_sha256"] == "sha256:" + hashlib.sha256(good).hexdigest()
+    assert meta.get("raw_bytes") == good
+    broken = b'[{"title":"OK","impact":"H\xc3\x26igh"}]'          # UTF-8 invalide
+    with pytest.raises(ci.FetchError) as ei:
+        ci.fetch_source(_BytesSession(broken), "https://x.invalid/feed.json")
+    assert ei.value.code == "INVALID_JSON"
 
 
 def test_h7_dripping_connection_is_cut_by_deadline():

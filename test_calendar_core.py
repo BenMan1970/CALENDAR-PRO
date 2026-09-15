@@ -336,10 +336,15 @@ def test_unknown_impact_vocabulary_raises_warning_not_exception():
     assert "SOURCE_IMPACT_VOCABULARY_CHANGED" in payload.quality.warnings
 
 
-def test_oversized_payload_is_rejected():
+def test_oversized_payload_is_truncated_with_warning_not_fatal():
+    """[F7 port] Surdimension : troncature + avertissement (flux FRAIS
+    amputé du surplus) plutôt que ValueError → fallback LKG (flux PÉRIMÉ
+    servi sans bruit). Contrat identique au calendar_layer macro v6."""
     policy = SelectionPolicy(max_events=3)
-    with pytest.raises(ValueError, match="payload too large"):
-        build(policy=policy)
+    payload = build(policy=policy)
+    assert "RAW_PAYLOAD_TRUNCATED_TO_3" in payload.quality.warnings
+    assert payload.quality.raw_event_count == 3
+    assert len(payload.events) <= 3
 
 
 # ── Immutabilité & invariants ────────────────────────────────────────────────
