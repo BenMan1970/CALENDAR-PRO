@@ -36,6 +36,7 @@ import requests
 import streamlit as st
 
 from calendar_core import (
+    SCHEMA_VERSION,               # [OPUS-A] exposé au diagnostic écran
     CalendarEvent,
     CalendarPayload,
     DEFAULT_DISPLAY_TZ,
@@ -73,9 +74,55 @@ from calendar_ingestor import (
 UTC = timezone.utc
 LOG = logging.getLogger("bluestar.streamlit")
 
+
+# -----------------------------------------------------------------------------
+# [OPUS-E] Lecture d'environnement durcie.
+# Mesuré avant correctif : `BLUESTAR_WINDOW_FUTURE_HOURS=` (définie mais VIDE,
+# cas banal d'un panneau « Secrets » Streamlit Cloud) → float("") → ValueError
+# À L'IMPORT de app.py → l'application entière ne démarre pas, écran blanc.
+# Idem int("") pour BLUESTAR_INGEST_INTERVAL / MAX_SOURCE_AGE_SECONDS.
+# Et `BLUESTAR_INCLUDE_GLOBAL="True "` (espace parasite) → "true " ∉ set → False
+# silencieusement, ce qui écarte tous les événements globaux sans un mot.
+# Règle : vide ou illisible == NON RENSEIGNÉE → défaut, + avertissement au log.
+# -----------------------------------------------------------------------------
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def env_str(name: str, default: str = "") -> str:
+    return (os.getenv(name) or "").strip() or default
+
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = env_str(name)
+    if not raw:
+        return default
+    return raw.lower() in _TRUTHY
+
+
+def env_float(name: str, default: float) -> float:
+    raw = env_str(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        LOG.warning("%s=%r illisible — repli sur %s", name, raw, default)
+        return default
+
+
+def env_int(name: str, default: int) -> int:
+    raw = env_str(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        LOG.warning("%s=%r illisible — repli sur %s", name, raw, default)
+        return default
+
 # H2 : ancré sur le dossier d'installation (plus sur le cwd) — sinon deux cwd
 # = deux jeux d'artefacts parallèles silencieux entre cron et Streamlit.
-DATA_DIR = _anchor_data_dir(os.getenv("BLUESTAR_DATA_DIR", "data"))
+DATA_DIR = _anchor_data_dir(env_str("BLUESTAR_DATA_DIR", "data"))
 
 CANONICAL_PATH = DATA_DIR / "calendar.latest.json"
 LEGACY_PATH = DATA_DIR / "calendar.legacy.json"
@@ -88,21 +135,13 @@ ACTUALS_PATH = DATA_DIR / "actuals_overlay.json"   # overlay de VUE v2.5.0
 # doit être le cron/systemd (mort fragmentaire incluse). BLUESTAR_DISABLE_INGEST
 # rend l'application strictement lectrice : plus aucun appel réseau sortant,
 # plus de bouton d'ingestion, l'affichage lit les artefacts tels que publiés.
-INGEST_ENABLED = os.getenv("BLUESTAR_DISABLE_INGEST", "false").strip().lower() not in {
-    "1", "true", "yes", "on"
-}
+INGEST_ENABLED = not env_bool("BLUESTAR_DISABLE_INGEST", False)
 
 # Fréquence de tentative réseau/ingestion.
-INGEST_INTERVAL_SECONDS = max(
-    60,
-    int(os.getenv("BLUESTAR_INGEST_INTERVAL", "300")),
-)
+INGEST_INTERVAL_SECONDS = max(60, env_int("BLUESTAR_INGEST_INTERVAL", 300))
 
 # Fréquence de recalcul de l'écran et des countdowns.
-UI_REFRESH_SECONDS = max(
-    5,
-    int(os.getenv("BLUESTAR_UI_REFRESH_INTERVAL", "10")),
-)
+UI_REFRESH_SECONDS = max(5, env_int("BLUESTAR_UI_REFRESH_INTERVAL", 10))
 
 # [F2 port] source unique : le core résout déjà BLUESTAR_DISPLAY_TZ (même nom
 # d'env, même défaut Casablanca) — plus de seconde littéralité à faire dériver.
@@ -235,7 +274,7 @@ ENERGY: Tuple[str, ...] = ("WTI", "BRENT")
 
 def parse_machine_impacts() -> Tuple[Impact, ...]:
     # HIGH seul sous-couvre AUD/CAD/CHF/JPY/NZD (voir calendar_core.SelectionPolicy).
-    raw = os.getenv("BLUESTAR_MACHINE_IMPACTS", "HIGH,MEDIUM")
+    raw = env_str("BLUESTAR_MACHINE_IMPACTS", "HIGH,MEDIUM")
     selected: List[Impact] = []
 
     for token in raw.split(","):
@@ -251,7 +290,7 @@ def parse_machine_impacts() -> Tuple[Impact, ...]:
 
 
 def parse_machine_currencies() -> Optional[Tuple[str, ...]]:
-    raw = os.getenv("BLUESTAR_MACHINE_CURRENCIES", "").strip()
+    raw = env_str("BLUESTAR_MACHINE_CURRENCIES")
 
     if not raw:
         return None
@@ -269,30 +308,21 @@ def parse_machine_currencies() -> Optional[Tuple[str, ...]]:
 MACHINE_POLICY = SelectionPolicy(
     impact_levels=parse_machine_impacts(),
     currencies=parse_machine_currencies(),
-    include_global_events=(
-        os.getenv("BLUESTAR_INCLUDE_GLOBAL", "true").lower()
-        in {"1", "true", "yes", "on"}
-    ),
+    include_global_events=env_bool("BLUESTAR_INCLUDE_GLOBAL", True),
     display_timezone=DEFAULT_DISPLAY_TIMEZONE,
     # [F7 port] défauts DÉRIVÉS de la politique du core — jamais dupliqués
     # (leçon macro : « 192 codé en dur ici vs 168 servi ailleurs » est
     # exactement la dérive silencieuse que ce port élimine). Les env vars
     # restent des overrides opérationnels légitimes.
-    window_past_hours=float(
-        os.getenv("BLUESTAR_WINDOW_PAST_HOURS", str(DEFAULT_POLICY.window_past_hours))
-    ),
-    window_future_hours=float(
-        os.getenv("BLUESTAR_WINDOW_FUTURE_HOURS", str(DEFAULT_POLICY.window_future_hours))
-    ),
-    imminent_hours=float(
-        os.getenv("BLUESTAR_IMMINENT_HOURS", str(DEFAULT_POLICY.imminent_hours))
-    ),
-    soon_hours=float(
-        os.getenv("BLUESTAR_SOON_HOURS", str(DEFAULT_POLICY.soon_hours))
-    ),
-    max_source_age_seconds=int(
-        os.getenv("BLUESTAR_MAX_SOURCE_AGE_SECONDS", "900")
-    ),
+    window_past_hours=env_float(
+        "BLUESTAR_WINDOW_PAST_HOURS", DEFAULT_POLICY.window_past_hours),
+    window_future_hours=env_float(
+        "BLUESTAR_WINDOW_FUTURE_HOURS", DEFAULT_POLICY.window_future_hours),
+    imminent_hours=env_float(
+        "BLUESTAR_IMMINENT_HOURS", DEFAULT_POLICY.imminent_hours),
+    soon_hours=env_float(
+        "BLUESTAR_SOON_HOURS", DEFAULT_POLICY.soon_hours),
+    max_source_age_seconds=env_int("BLUESTAR_MAX_SOURCE_AGE_SECONDS", 900),
 )
 
 
@@ -396,16 +426,29 @@ def load_payload() -> Optional[CalendarPayload]:
     return _load_payload_cached(str(CANONICAL_PATH), st_.st_mtime_ns, st_.st_size)
 
 
+# [OPUS-A] L'échec de validation était AVALÉ : `return None` + trace dans les
+# logs serveur uniquement. Écran rouge « aucun artefact valide » avec
+# `canonical_exists: true` juste en dessous — contradiction insoluble pour
+# l'exploitant. Cause typique : artefact écrit par un core d'une autre
+# version, rejeté en bloc par `extra="forbid"`. On conserve le comportement
+# (None) ; on rend simplement la RAISON lisible à l'écran.
+_LAST_LOAD_ERROR: Dict[str, Optional[str]] = {"msg": None}
+
+
 @st.cache_data(show_spinner=False)
 def _load_payload_cached(path_str: str, mtime_ns: int, size: int) -> Optional[CalendarPayload]:
     raw = read_json(Path(path_str))
     if raw is None:
+        _LAST_LOAD_ERROR["msg"] = "JSON illisible ou absent"
         return None
     try:
-        return CalendarPayload.model_validate(raw)
+        payload = CalendarPayload.model_validate(raw)
     except Exception as exc:  # validation Pydantic détaillée dans les diagnostics
+        _LAST_LOAD_ERROR["msg"] = f"{type(exc).__name__}: {exc}"
         LOG.exception("Invalid canonical artifact: %s", exc)
         return None
+    _LAST_LOAD_ERROR["msg"] = None
+    return payload
 
 
 def load_health() -> Optional[Dict[str, Any]]:
@@ -958,11 +1001,22 @@ def render_sidebar() -> ViewFilters:
 
     side_label("Niveau d'impact")
 
-    impact_options = (
-        ("HIGH ⭐⭐⭐", Impact.HIGH, True),
-        ("MEDIUM ⭐⭐", Impact.MEDIUM, False),
-        ("LOW ⭐", Impact.LOW, False),
-        ("HOLIDAY", Impact.HOLIDAY, False),
+    # [OPUS-C] Le défaut des cases est DÉRIVÉ de la politique machine, il
+    # n'est plus une littéralité parallèle. Mesuré avant correctif sur
+    # l'artefact réel du 16/09 : MACHINE_POLICY publie HIGH+MEDIUM (27
+    # événements) mais la case MEDIUM était décochée en dur → 16/27 à
+    # l'écran. Les 11 masqués incluaient Retail Sales, Core Retail Sales
+    # (IMMINENT), Unemployment Claims, Philly Fed, Lagarde ×2. Un opérateur
+    # qui ne voit ni les Claims ni les Retail Sales conclut, à raison, que
+    # « l'app ne donne rien ». Ici la divergence devient impossible.
+    impact_options = tuple(
+        (label, impact, impact in MACHINE_POLICY.impact_levels)
+        for label, impact in (
+            ("HIGH ⭐⭐⭐", Impact.HIGH),
+            ("MEDIUM ⭐⭐", Impact.MEDIUM),
+            ("LOW ⭐", Impact.LOW),
+            ("HOLIDAY", Impact.HOLIDAY),
+        )
     )
 
     selected_impacts: List[Impact] = []
@@ -1665,6 +1719,14 @@ def _render_application_body(filters: ViewFilters) -> None:
             "data_dir": str(DATA_DIR),
             "canonical_path": str(CANONICAL_PATH),
             "canonical_exists": CANONICAL_PATH.exists(),
+            # [OPUS-A] les trois lignes qui manquaient pour trancher :
+            "ingestion_enabled": INGEST_ENABLED,
+            "canonical_schema_version": (
+                (read_json(CANONICAL_PATH) or {}).get("schema_version")
+                if CANONICAL_PATH.exists() else None
+            ),
+            "app_schema_version": SCHEMA_VERSION,
+            "canonical_parse_error": _LAST_LOAD_ERROR["msg"],
             "health_exists": HEALTH_PATH.exists(),
             "state_exists": STATE_PATH.exists(),
             "last_runtime_error": runtime.last_runtime_error,
@@ -1679,10 +1741,26 @@ def _render_application_body(filters: ViewFilters) -> None:
             st.markdown("### Circuit breaker")
             st.json(state)
 
-        st.warning(
-            "Vérifiez l’accès réseau sortant vers la source, "
-            "les logs Streamlit et la variable BLUESTAR_DATA_DIR."
-        )
+        # [OPUS-A] En mode lecteur, AUCUN appel réseau n'est tenté : conseiller
+        # de « vérifier le réseau » envoyait l'exploitant sur une fausse piste
+        # pendant que la vraie cause (data/ vide + aucun producteur) restait
+        # invisible. Sur Streamlit Community Cloud le filesystem est éphémère
+        # et aucun cron externe ne peut écrire dans ce conteneur : le mode
+        # lecteur y est structurellement une impasse.
+        if not INGEST_ENABLED:
+            st.warning(
+                "Mode LECTEUR actif (BLUESTAR_DISABLE_INGEST) : cette instance "
+                "n'émet aucun appel réseau et attend qu'un producteur externe "
+                "écrive dans " + str(DATA_DIR) + ". Sur Streamlit Community "
+                "Cloud, ce producteur n'existe pas et le disque est éphémère — "
+                "retirez BLUESTAR_DISABLE_INGEST pour que l'application "
+                "alimente elle-même son calendrier."
+            )
+        else:
+            st.warning(
+                "Vérifiez l’accès réseau sortant vers la source, "
+                "les logs Streamlit et la variable BLUESTAR_DATA_DIR."
+            )
         return
 
     reference = now_utc()

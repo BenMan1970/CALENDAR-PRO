@@ -9,7 +9,7 @@ streamlit==1.63.0
 pydantic==2.13.4
 requests==2.34.2
 urllib3==2.7.0          # >=2.2 requis par Retry(backoff_jitter=…) (calendar_ingestor)
-tzdata==2026.3          # zoneinfo sous Windows / images slim (Wellington/Sydney/DST [B8])
+tzdata==2026.4          # [OPUS-TZ] 2026.3 NE CONTIENT PAS la regle marocaine du 20/09/2026 (decret 2.26.530, Africa/Casablanca -> +00). Plancher DUR : en dessous, heures fausses d une heure.
 
 # dev / CI
 pytest==9.1.1           # l'ancien « >=8.0,<9.0 » était contredit par l'usage réel (9.1.1)

@@ -31,7 +31,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple  # [OPUS-F] List: annotation
 
 import requests
 from requests.adapters import HTTPAdapter

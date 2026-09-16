@@ -140,12 +140,32 @@ from pydantic import (
 # Try/except : sans le paquet (Windows propre, env exotique), on reste sur le
 # comportement par défaut — tz_environment() le dira honnêtement.
 # ─────────────────────────────────────────────────────────────────────────────
+# [OPUS-TZ 16/09/2026] CORRECTION D'UN GARDE INOPERANT.
+# La version precedente faisait `_zoneinfo.TZPATH = (_d,) + ...`. PEP 615 :
+# cette affectation ne fait que REBINDER l'attribut de module ; le chemin
+# de recherche reellement utilise par ZoneInfo() est interne et n'est
+# modifiable QUE par reset_tzpath(). Mesure avant correction, tzdata pip
+# 2026.4 installe :
+#   TZPATH[0] affiche  -> .../tzdata/zoneinfo   (le diagnostic disait VRAI)
+#   offset observe le 2026-09-21 Africa/Casablanca -> +01:00  (FAUX)
+# Le garde annoncait donc son propre succes tout en laissant le tzdata
+# SYSTEME faire autorite. C'est exactement la panne que le commentaire B2
+# ci-dessus decrit et croyait avoir empechee : heures fausses d'une heure
+# des le 20/09/2026, silencieusement, sur toute la vue.
+# clear_cache() : reset_tzpath() n'invalide pas le cache d'instances
+# ZoneInfo deja construites (PEP 615) ; sans lui, un import indirect
+# anterieur figerait les anciennes regles.
 def _pin_pip_tzdata() -> None:
     try:
         import tzdata as _td
-        _d = os.path.join(os.path.dirname(_td.__file__), "zoneinfo")
-        if os.path.isdir(_d) and _d not in tuple(_zoneinfo.TZPATH):
-            _zoneinfo.TZPATH = (_d,) + tuple(_zoneinfo.TZPATH)
+        _d = os.path.abspath(os.path.join(os.path.dirname(_td.__file__), "zoneinfo"))
+        if not os.path.isdir(_d):
+            return
+        current = [str(p) for p in _zoneinfo.TZPATH]
+        if current and os.path.abspath(current[0]) == _d:
+            return
+        _zoneinfo.ZoneInfo.clear_cache()
+        _zoneinfo.reset_tzpath([_d] + [p for p in current if os.path.abspath(p) != _d])
     except Exception:                                       # noqa: BLE001
         pass
 
@@ -1041,18 +1061,38 @@ def build_payload(
     lo = now_utc - timedelta(hours=policy.window_past_hours)
     hi = now_utc + timedelta(hours=policy.window_future_hours)
 
+    # [OPUS-B] Instrumentation de l'entonnoir de selection.
+    # L'invariant B1 ne refuse le VIDE que pour la derive de vocabulaire.
+    # Toute AUTRE cause d'entonnoir vide passait en VALID / score 1.000 /
+    # zero evenement -- artefact publie, et l'aval lit un calendrier vide
+    # comme un fait de marche. Mesure : BLUESTAR_MACHINE_CURRENCIES=EURO
+    # -> 27 lignes normalisees, 0 evenement, VALID 1.000, aucun warning.
+    # On ne DEPLACE PAS le statut (decision de review board ; cela
+    # casserait test_b1_calm_week_without_high_is_legitimately_publishable)
+    # : on NOMME la cause. "0 evenement" devient "27 ecartes par devise".
+    drop = {"impact": 0, "global": 0, "currency": 0, "window": 0}
     selected: List[Dict[str, Any]] = []
     for row in rows:
         if row["impact"] not in policy.impact_levels:
+            drop["impact"] += 1
             continue
         if row["is_global"] and not policy.include_global_events:
+            drop["global"] += 1
             continue
         if (policy.currencies is not None and not row["is_global"]
                 and row["currency"] not in policy.currencies):
+            drop["currency"] += 1
             continue
         if not (lo <= row["scheduled_at_utc"] <= hi):
+            drop["window"] += 1
             continue
         selected.append(row)
+
+    if rows and not selected:
+        warnings.append(
+            "SELECTION_EMPTY:"
+            + ",".join(f"{k}={v}" for k, v in drop.items() if v)
+        )
 
     coverage = _coverage_diagnostics(rows, selected, policy, lo, hi)
 
