@@ -32,16 +32,19 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import requests
 import streamlit as st
+# [audit OPUS 16-09-2026] ``import requests`` était mort depuis le correctif B4
+# (session jetable par cycle, construite dans calendar_ingestor). Toute la
+# couche réseau vit dans l'ingestor ; app.py ne fait plus de HTTP direct.
 
 from calendar_core import (
-    SCHEMA_VERSION,               # [OPUS-A] exposé au diagnostic écran
+    SCHEMA_VERSION,
     CalendarEvent,
     CalendarPayload,
     DEFAULT_DISPLAY_TZ,
     DEFAULT_POLICY,
     Impact,
+    KNOWN_CURRENCIES,
     QualityStatus,
     SelectionPolicy,
     Session,
@@ -60,7 +63,7 @@ from calendar_ingestor import (
     build_session,
     publish_lock_held,
     run_once,
-    _anchor_data_dir,
+    anchor_data_dir,   # alias public (audit OPUS 16-09-2026)
 )
 
 # H3 (audit 2026-09-11) : le verrou inter-processus vit dans run_once — que
@@ -75,54 +78,51 @@ UTC = timezone.utc
 LOG = logging.getLogger("bluestar.streamlit")
 
 
-# -----------------------------------------------------------------------------
-# [OPUS-E] Lecture d'environnement durcie.
-# Mesuré avant correctif : `BLUESTAR_WINDOW_FUTURE_HOURS=` (définie mais VIDE,
-# cas banal d'un panneau « Secrets » Streamlit Cloud) → float("") → ValueError
-# À L'IMPORT de app.py → l'application entière ne démarre pas, écran blanc.
-# Idem int("") pour BLUESTAR_INGEST_INTERVAL / MAX_SOURCE_AGE_SECONDS.
-# Et `BLUESTAR_INCLUDE_GLOBAL="True "` (espace parasite) → "true " ∉ set → False
-# silencieusement, ce qui écarte tous les événements globaux sans un mot.
-# Règle : vide ou illisible == NON RENSEIGNÉE → défaut, + avertissement au log.
-# -----------------------------------------------------------------------------
-_TRUTHY = {"1", "true", "yes", "on"}
+# =============================================================================
+# LECTURE D'ENVIRONNEMENT DURCIE
+# =============================================================================
+def _env_str(name: str, default: str) -> str:
+    """[audit OPUS branche B, 16-09-2026] Une variable DÉFINIE MAIS VIDE
+    (BLUESTAR_WINDOW_PAST_HOURS=) n'est pas une absence : ``os.getenv`` rend ""
+    et ``float("")`` lève ValueError â‚¬ L'IMPORT — l'application entière refuse
+    de démarrer pour une coquille de config. On normalise (strip) et on replie
+    sur le défaut quand il ne reste rien d'exploitable."""
+    raw = (os.getenv(name) or "").strip()
+    return raw if raw else default
 
 
-def env_str(name: str, default: str = "") -> str:
-    return (os.getenv(name) or "").strip() or default
-
-
-def env_bool(name: str, default: bool) -> bool:
-    raw = env_str(name)
+def _env_bool(name: str, default: bool) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
     if not raw:
         return default
-    return raw.lower() in _TRUTHY
+    return raw in {"1", "true", "yes", "on"}
 
 
-def env_float(name: str, default: float) -> float:
-    raw = env_str(name)
-    if not raw:
-        return default
+def _env_int(name: str, default: int, minimum: Optional[int] = None) -> int:
+    raw = _env_str(name, str(default))
     try:
-        return float(raw)
+        value = int(raw)
     except ValueError:
-        LOG.warning("%s=%r illisible — repli sur %s", name, raw, default)
-        return default
+        LOG.warning("Ignoring invalid int env %s=%r (using %d)", name, raw, default)
+        value = default
+    if minimum is not None and value < minimum:
+        LOG.warning("Clamping env %s=%d to minimum %d", name, value, minimum)
+        value = minimum
+    return value
 
 
-def env_int(name: str, default: int) -> int:
-    raw = env_str(name)
-    if not raw:
-        return default
+def _env_float(name: str, default: float) -> float:
+    raw = _env_str(name, str(default))
     try:
-        return int(raw)
+        value = float(raw)
     except ValueError:
-        LOG.warning("%s=%r illisible — repli sur %s", name, raw, default)
+        LOG.warning("Ignoring invalid float env %s=%r (using %s)", name, raw, default)
         return default
+    return value
 
 # H2 : ancré sur le dossier d'installation (plus sur le cwd) — sinon deux cwd
 # = deux jeux d'artefacts parallèles silencieux entre cron et Streamlit.
-DATA_DIR = _anchor_data_dir(env_str("BLUESTAR_DATA_DIR", "data"))
+DATA_DIR = anchor_data_dir(os.getenv("BLUESTAR_DATA_DIR", "data"))
 
 CANONICAL_PATH = DATA_DIR / "calendar.latest.json"
 LEGACY_PATH = DATA_DIR / "calendar.legacy.json"
@@ -135,13 +135,13 @@ ACTUALS_PATH = DATA_DIR / "actuals_overlay.json"   # overlay de VUE v2.5.0
 # doit être le cron/systemd (mort fragmentaire incluse). BLUESTAR_DISABLE_INGEST
 # rend l'application strictement lectrice : plus aucun appel réseau sortant,
 # plus de bouton d'ingestion, l'affichage lit les artefacts tels que publiés.
-INGEST_ENABLED = not env_bool("BLUESTAR_DISABLE_INGEST", False)
+INGEST_ENABLED = not _env_bool("BLUESTAR_DISABLE_INGEST", False)
 
 # Fréquence de tentative réseau/ingestion.
-INGEST_INTERVAL_SECONDS = max(60, env_int("BLUESTAR_INGEST_INTERVAL", 300))
+INGEST_INTERVAL_SECONDS = _env_int("BLUESTAR_INGEST_INTERVAL", 300, minimum=60)
 
 # Fréquence de recalcul de l'écran et des countdowns.
-UI_REFRESH_SECONDS = max(5, env_int("BLUESTAR_UI_REFRESH_INTERVAL", 10))
+UI_REFRESH_SECONDS = _env_int("BLUESTAR_UI_REFRESH_INTERVAL", 10, minimum=5)
 
 # [F2 port] source unique : le core résout déjà BLUESTAR_DISPLAY_TZ (même nom
 # d'env, même défaut Casablanca) — plus de seconde littéralité à faire dériver.
@@ -274,7 +274,7 @@ ENERGY: Tuple[str, ...] = ("WTI", "BRENT")
 
 def parse_machine_impacts() -> Tuple[Impact, ...]:
     # HIGH seul sous-couvre AUD/CAD/CHF/JPY/NZD (voir calendar_core.SelectionPolicy).
-    raw = env_str("BLUESTAR_MACHINE_IMPACTS", "HIGH,MEDIUM")
+    raw = _env_str("BLUESTAR_MACHINE_IMPACTS", "HIGH,MEDIUM")
     selected: List[Impact] = []
 
     for token in raw.split(","):
@@ -284,13 +284,25 @@ def parse_machine_impacts() -> Tuple[Impact, ...]:
         try:
             selected.append(Impact(name))
         except ValueError:
-            LOG.warning("Ignoring invalid machine impact: %s", name)
+            # [audit branche B] « HIGh », « Medium(2) », « HIGH;MEDIUM » : un
+            # token invalide écartait SILENCIEEUSEMENT le niveau, et l'artefact
+            # était publié vide en VALID 1.000. On le dit, fort.
+            LOG.warning("Ignoring invalid machine impact %r (valid: %s)",
+                        name, ", ".join(i.value for i in Impact))
+
+    if raw and not selected:
+        LOG.error(
+            "BLUESTAR_MACHINE_IMPACTS=%r contains NO valid impact — falling "
+            "back to HIGH only; the artifact would otherwise be empty",
+            raw,
+        )
+        return (Impact.HIGH,)
 
     return tuple(dict.fromkeys(selected)) or (Impact.HIGH,)
 
 
 def parse_machine_currencies() -> Optional[Tuple[str, ...]]:
-    raw = env_str("BLUESTAR_MACHINE_CURRENCIES")
+    raw = _env_str("BLUESTAR_MACHINE_CURRENCIES", "")
 
     if not raw:
         return None
@@ -302,27 +314,36 @@ def parse_machine_currencies() -> Optional[Tuple[str, ...]]:
             if token.strip()
         })
     )
+    # [audit branche B] « EURO », « USD;EUR », un code hors vocabulaire : aucune
+    # ligne ne matche î¢— ’ events=0. On alerte, car l'UI ne distingue pas ce cas
+    # d'une semaine sans actualité.
+    if selected and not all(c in KNOWN_CURRENCIES for c in selected):
+        unknown = [c for c in selected if c not in KNOWN_CURRENCIES]
+        LOG.error(
+            "BLUESTAR_MACHINE_CURRENCIES contains unknown code(s) %s "
+            "(valid: %s) — those currencies will match NOTHING",
+            ", ".join(unknown), ", ".join(KNOWN_CURRENCIES),
+        )
     return selected or None
 
 
 MACHINE_POLICY = SelectionPolicy(
     impact_levels=parse_machine_impacts(),
     currencies=parse_machine_currencies(),
-    include_global_events=env_bool("BLUESTAR_INCLUDE_GLOBAL", True),
+    include_global_events=_env_bool("BLUESTAR_INCLUDE_GLOBAL", True),
     display_timezone=DEFAULT_DISPLAY_TIMEZONE,
     # [F7 port] défauts DÉRIVÉS de la politique du core — jamais dupliqués
     # (leçon macro : « 192 codé en dur ici vs 168 servi ailleurs » est
     # exactement la dérive silencieuse que ce port élimine). Les env vars
     # restent des overrides opérationnels légitimes.
-    window_past_hours=env_float(
+    window_past_hours=_env_float(
         "BLUESTAR_WINDOW_PAST_HOURS", DEFAULT_POLICY.window_past_hours),
-    window_future_hours=env_float(
+    window_future_hours=_env_float(
         "BLUESTAR_WINDOW_FUTURE_HOURS", DEFAULT_POLICY.window_future_hours),
-    imminent_hours=env_float(
+    imminent_hours=_env_float(
         "BLUESTAR_IMMINENT_HOURS", DEFAULT_POLICY.imminent_hours),
-    soon_hours=env_float(
-        "BLUESTAR_SOON_HOURS", DEFAULT_POLICY.soon_hours),
-    max_source_age_seconds=env_int("BLUESTAR_MAX_SOURCE_AGE_SECONDS", 900),
+    soon_hours=_env_float("BLUESTAR_SOON_HOURS", DEFAULT_POLICY.soon_hours),
+    max_source_age_seconds=_env_int("BLUESTAR_MAX_SOURCE_AGE_SECONDS", 900),
 )
 
 
@@ -364,7 +385,7 @@ def _tz_env_forensic() -> Dict[str, Any]:
 
 @st.cache_resource
 def _log_startup_forensics() -> str:
-    """[câblage audit OPUS] Une fois par processus : où sont les artefacts et
+    """[c¢blage audit OPUS] Une fois par processus : o¹ sont les artefacts et
     quelles règles horaires governent l'affichage. En cas d'heure fausse, la
     réponse est dans la première ligne du log, pas dans une hypothèse."""
     # La conversion UTC est posée AVANT toute considération de handler : si
@@ -411,7 +432,7 @@ def load_payload() -> Optional[CalendarPayload]:
     """
     Charge le fichier courant, parsé et validé une seule fois par version.
 
-    [perf audit OPUS] L'onglet "exports"/"quality" est rendu À CHAQUE tick
+    [perf audit OPUS] L'onglet "exports"/"quality" est rendu â‚¬ CHAQUE tick
     du fragment : le parse + validation Pydantic de l'artefact complet
     (~150 Ko) tournait toutes les UI_REFRESH_SECONDS pour un fichier qui
     change au plus toutes les INGEST_INTERVAL. Le cache est clé sur
@@ -426,12 +447,10 @@ def load_payload() -> Optional[CalendarPayload]:
     return _load_payload_cached(str(CANONICAL_PATH), st_.st_mtime_ns, st_.st_size)
 
 
-# [OPUS-A] L'échec de validation était AVALÉ : `return None` + trace dans les
-# logs serveur uniquement. Écran rouge « aucun artefact valide » avec
-# `canonical_exists: true` juste en dessous — contradiction insoluble pour
-# l'exploitant. Cause typique : artefact écrit par un core d'une autre
-# version, rejeté en bloc par `extra="forbid"`. On conserve le comportement
-# (None) ; on rend simplement la RAISON lisible à l'écran.
+# [audit OPUS branche A] Une ValidationError Pydantic (extra="forbid" partout)
+# est AVALEE ici : l'ecran rouge « Aucun artefact canonique valide » s'affiche
+# SANS DIRE POURQUOI, et l'operateur part chercher un probleme reseau alors que
+# l'artefact est simplement d'une autre version de core. On garde la cause.
 _LAST_LOAD_ERROR: Dict[str, Optional[str]] = {"msg": None}
 
 
@@ -439,16 +458,15 @@ _LAST_LOAD_ERROR: Dict[str, Optional[str]] = {"msg": None}
 def _load_payload_cached(path_str: str, mtime_ns: int, size: int) -> Optional[CalendarPayload]:
     raw = read_json(Path(path_str))
     if raw is None:
-        _LAST_LOAD_ERROR["msg"] = "JSON illisible ou absent"
+        _LAST_LOAD_ERROR["msg"] = "JSON illisible (corrompu ou encodage non UTF-8)"
         return None
     try:
-        payload = CalendarPayload.model_validate(raw)
+        _LAST_LOAD_ERROR["msg"] = None
+        return CalendarPayload.model_validate(raw)
     except Exception as exc:  # validation Pydantic détaillée dans les diagnostics
         _LAST_LOAD_ERROR["msg"] = f"{type(exc).__name__}: {exc}"
         LOG.exception("Invalid canonical artifact: %s", exc)
         return None
-    _LAST_LOAD_ERROR["msg"] = None
-    return payload
 
 
 def load_health() -> Optional[Dict[str, Any]]:
@@ -466,7 +484,7 @@ def load_state() -> Optional[Dict[str, Any]]:
 # Le flux JSON hebdo ne publie pas les actuals (0/105 clés mesuré le 15/09) ;
 # l'ingesteur les collecte sur la page publique du calendrier FF (données
 # embarquées, même dateline epoch que le flux) dans data/actuals_overlay.json.
-# Fichier absent ou vide → index vide → affichage STRICTEMENT identique à
+# Fichier absent ou vide î¢— ’ index vide î¢— ’ affichage STRICTEMENT identique à
 # avant : cette brique ne peut rien casser et ne touche ni calendar.json, ni
 # le content_hash inter-apps, ni l'ENGINE.
 # =============================================================================
@@ -618,7 +636,7 @@ def ensure_artifacts(force: bool = False) -> bool:
 
 
 # =============================================================================
-# MODÈLE DE VUE
+# MODË†LE DE VUE
 # =============================================================================
 
 @dataclass(frozen=True)
@@ -861,7 +879,7 @@ def html_block(markup: str) -> None:
 
 
 def render_stat_grid(cards: Sequence[Tuple[str, str, str, str]]) -> None:
-    """cards = ((label, value, subtitle, tone), ...) ; tone ∈ ok|warn|crit|info|''"""
+    """cards = ((label, value, subtitle, tone), ...) ; tone î¢Ë†Ë† ok|warn|crit|info|''"""
     items = "".join(
         f'<div class="bs-stat bs-stat--{tone}">'
         f'<span class="bs-stat__label">{escape(label)}</span>'
@@ -995,26 +1013,24 @@ def side_label(text: str) -> None:
 
 
 def render_sidebar() -> ViewFilters:
-    st.sidebar.title("🔷 BLUESTAR Calendar")
+    st.sidebar.title("î°Å¸”· BLUESTAR Calendar")
     st.sidebar.caption("Canonical data · Live computed view")
     st.sidebar.divider()
 
     side_label("Niveau d'impact")
 
-    # [OPUS-C] Le défaut des cases est DÉRIVÉ de la politique machine, il
-    # n'est plus une littéralité parallèle. Mesuré avant correctif sur
-    # l'artefact réel du 16/09 : MACHINE_POLICY publie HIGH+MEDIUM (27
-    # événements) mais la case MEDIUM était décochée en dur → 16/27 à
-    # l'écran. Les 11 masqués incluaient Retail Sales, Core Retail Sales
-    # (IMMINENT), Unemployment Claims, Philly Fed, Lagarde ×2. Un opérateur
-    # qui ne voit ni les Claims ni les Retail Sales conclut, à raison, que
-    # « l'app ne donne rien ». Ici la divergence devient impossible.
+    # [audit OPUS 16-09-2026, branche C] Les defaults sont DÉRIVÉS de la
+    # politique machine : cocher une case dont le niveau n'est jamais ingéré
+    # donnait l'illusion de commander un contenu inexistant, et inversement
+    # MEDIUM décoché par défaut masquait la moitié de l'artefact (11 événements
+    # sur 27 — Retail Sales, Unemployment Claims, Philly Fed, Lagarde•¦).
+    # Dérivé = la divergence devient structurellement impossible.
     impact_options = tuple(
         (label, impact, impact in MACHINE_POLICY.impact_levels)
         for label, impact in (
-            ("HIGH ⭐⭐⭐", Impact.HIGH),
-            ("MEDIUM ⭐⭐", Impact.MEDIUM),
-            ("LOW ⭐", Impact.LOW),
+            ("HIGH î¢­î¢­î¢­", Impact.HIGH),
+            ("MEDIUM î¢­î¢­", Impact.MEDIUM),
+            ("LOW î¢­", Impact.LOW),
             ("HOLIDAY", Impact.HOLIDAY),
         )
     )
@@ -1035,9 +1051,21 @@ def render_sidebar() -> ViewFilters:
     # deux cases donnaient l'illusion de commander un contenu inexistant.
     if {Impact.LOW, Impact.HOLIDAY} & set(selected_impacts):
         st.sidebar.caption(
-            "ℹ️ La politique machine n'ingère que HIGH et MEDIUM : "
-            "LOW/HOLIDAY sont absents de l'artefact — ces cases ne peuvent "
-            "rien ajouter à la vue."
+            f"î¢—ž¹î¯¸ La politique machine n'ingère que "
+            f"{', '.join(i.value for i in MACHINE_POLICY.impact_levels)} : "
+            "les autres niveaux sont absents de l'artefact — ces cases ne "
+            "peuvent rien ajouter à la vue."
+        )
+    # Et la réciproque, qui était le bug visible : décocher un niveau que la
+    # machine publie ne le supprime pas de l'artefact, il disparaît juste de
+    # l'écran. C'est ainsi que l'application paraissait « vide » alors que
+    # l'artefact était plein.
+    unpublished = set(MACHINE_POLICY.impact_levels) - set(selected_impacts)
+    if unpublished:
+        st.sidebar.caption(
+            "î¢Å¡ î¯¸ " + ", ".join(sorted(i.value for i in unpublished))
+            + " sont publiés dans l'artefact mais masqués par vos cases — "
+              "l'export calendar.json et le moteur desk les lisent toujours."
         )
 
     side_label("Devises")
@@ -1078,10 +1106,10 @@ def render_sidebar() -> ViewFilters:
     side_label("Proximité")
 
     proximity_labels = {
-        TimeProximity.IMMINENT: "🔴 IMMINENT (< 6h)",
-        TimeProximity.SOON: "🟠 SOON (< 48h)",
-        TimeProximity.LATER: "🔵 LATER",
-        TimeProximity.PAST: "⚪ PAST",
+        TimeProximity.IMMINENT: "î°Å¸”´ IMMINENT (< 6h)",
+        TimeProximity.SOON: "î°Å¸Å¸  SOON (< 48h)",
+        TimeProximity.LATER: "î°Å¸”µ LATER",
+        TimeProximity.PAST: "î¢Å¡ª PAST",
     }
 
     selected_proximities: List[TimeProximity] = []
@@ -1104,7 +1132,7 @@ def render_sidebar() -> ViewFilters:
         default_timezone_index = 0
 
     display_timezone = st.sidebar.selectbox(
-        "🌍 Fuseau horaire d’affichage",
+        "î°Å¸Œ Fuseau horaire d•â„¢affichage",
         DISPLAY_TIMEZONES,
         index=default_timezone_index,
     )
@@ -1113,17 +1141,17 @@ def render_sidebar() -> ViewFilters:
     side_label("Options")
 
     include_global = st.sidebar.checkbox(
-        "🌍 Inclure les événements globaux",
+        "î°Å¸Œ Inclure les événements globaux",
         value=True,
     )
 
     show_assets_extended = st.sidebar.checkbox(
-        "🎯 Afficher métaux et indices",
+        "î°Å¸Å½¯ Afficher métaux et indices",
         value=True,
     )
 
     auto_refresh = st.sidebar.checkbox(
-        f"🔄 Rafraîchissement visuel ({UI_REFRESH_SECONDS}s)",
+        f"î°Å¸—ž Rafraîchissement visuel ({UI_REFRESH_SECONDS}s)",
         value=True,
     )
 
@@ -1145,7 +1173,7 @@ def render_sidebar() -> ViewFilters:
     else:
         # [B3 audit OPUS] mode lecteur affiché, pas deviné.
         st.sidebar.caption(
-            "🔒 **Lecture seule** (`BLUESTAR_DISABLE_INGEST`) — un producteur "
+            "î°Å¸”’ **Lecture seule** (`BLUESTAR_DISABLE_INGEST`) — un producteur "
             "externe (cron/systemd) alimente les artefacts ; cette instance "
             "n'émet aucun appel réseau sortant."
         )
@@ -1233,7 +1261,7 @@ def render_header(
         (
             "Source",
             "STALE" if dynamically_stale else "FRAIS",
-            f"âge {source_age}s",
+            f"¢ge {source_age}s",
             "crit" if dynamically_stale else "ok",
         ),
         (
@@ -1245,7 +1273,7 @@ def render_header(
         (
             "Actual",
             ("SUPPORTÉ" if payload.source.supports_actual
-             else (f"SITE ×{ov_hits}" if ov_hits else "ABSENT")),
+             else (f"SITE —{ov_hits}" if ov_hits else "ABSENT")),
             (payload.numeric_parser_version if (payload.source.supports_actual
                                                  or not ov_hits)
              else "overlay page publique FF (flux JSON sans actual)"),
@@ -1263,7 +1291,7 @@ def render_header(
     runtime = runtime_control()
     if runtime.last_runtime_error:
         st.error(
-            f"Erreur runtime de l’orchestrateur : {runtime.last_runtime_error}"
+            f"Erreur runtime de l•â„¢orchestrateur : {runtime.last_runtime_error}"
         )
 
     warnings = list(payload.quality.warnings)
@@ -1294,7 +1322,7 @@ def render_trading_desk(
     events: Sequence[CalendarEvent],
     filters: ViewFilters,
 ) -> None:
-    st.subheader("🎯 Trading Desk")
+    st.subheader("î°Å¸Å½¯ Trading Desk")
 
     if not events:
         st.info(
@@ -1307,7 +1335,7 @@ def render_trading_desk(
     sections = (
         (TimeProximity.IMMINENT, "Événements imminents", "imminent", False),
         (TimeProximity.SOON, "Prochainement", "soon", False),
-        (TimeProximity.LATER, "À venir", "later", True),
+        (TimeProximity.LATER, "â‚¬ venir", "later", True),
         (TimeProximity.PAST, "Passés", "past", True),
     )
 
@@ -1335,7 +1363,7 @@ def render_detailed_view(
     events: Sequence[CalendarEvent],
     filters: ViewFilters,
 ) -> None:
-    st.subheader("📋 Vue détaillée")
+    st.subheader("î°Å¸—¹ Vue détaillée")
 
     if not events:
         st.info(
@@ -1406,7 +1434,7 @@ def render_assets_view(
     events: Sequence[CalendarEvent],
     filters: ViewFilters,
 ) -> None:
-    st.subheader("🥇 Métaux · Indices · Énergie · Forex")
+    st.subheader("î°Å¸¥—¡ Métaux · Indices · Énergie · Forex")
 
     if not filters.show_assets_extended:
         st.info(
@@ -1421,7 +1449,7 @@ def render_assets_view(
             asset_events.setdefault(asset, []).append(event)
 
     tab_metals, tab_indices, tab_energy, tab_forex, tab_global = st.tabs(
-        ["🥇 Métaux", "📈 Indices", "🛢️ Énergie", "💱 Forex", "🌐 Global"]
+        ["î°Å¸¥—¡ Métaux", "î°Å¸“Ë† Indices", "î°Å¸—º¢î¯¸ Énergie", "î°Å¸’± Forex", "î°Å¸Œ Global"]
     )
 
     categories = (
@@ -1497,12 +1525,12 @@ def render_quality_view(
     state: Optional[Dict[str, Any]],
     reference: datetime,
 ) -> None:
-    st.subheader("🔍 Qualité & Diagnostics")
+    st.subheader("î°Å¸” Qualité & Diagnostics")
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.markdown("#### 📊 Payload canonique")
+        st.markdown("#### î°Å¸“Å  Payload canonique")
         st.json({
             "schema_version": payload.schema_version,
             "generated_at_utc": iso_z(payload.generated_at_utc),
@@ -1517,7 +1545,7 @@ def render_quality_view(
         })
 
     with col2:
-        st.markdown("#### 🔗 Source")
+        st.markdown("#### î°Å¸— Source")
         st.json(payload.source.model_dump(mode="json"))
         _, ov_meta = load_actuals_state()
         if ov_meta.get("entries"):
@@ -1528,19 +1556,46 @@ def render_quality_view(
                 f"Le flux JSON hebdo lui-même ne publie toujours aucun actual."
             )
 
-    st.markdown("#### 🏥 Health")
+    # [audit OPUS branche B] L'entonnoir de sélection, NOMMÉ. Un écran vide
+    # n'est plus un mystère : on sait combien de lignes ont été écartées et
+    # par quel motif. Cas le plus fréquent : BLUESTAR_MACHINE_IMPACTS ou
+    # BLUESTAR_MACHINE_CURRENCIES mal orthographiée î¢— ’ tout écarté, artefact
+    # publié vide en VALID 1.000.
+    dropped = payload.quality.selection_dropped
+    if dropped:
+        with st.expander(
+            f"Entonnoir de sélection — {sum(dropped.values())} ligne(s) écartée(s)"
+        ):
+            st.caption(
+                "Lignes normalisées par la source mais non retenues dans "
+                "l'artefact, par motif. Les filtres UI de la sidebar ne sont "
+                "PAS responsables de ces chiffres : c'est la politique "
+                "machine (BLUESTAR_MACHINE_IMPACTS / _CURRENCIES / fenêtre) "
+                "qui décide."
+            )
+            st.json(dropped)
+            if not payload.events:
+                st.error(
+                    "Aucun événement retenu alors que la source contenait des "
+                    "lignes : la politique machine écarte tout. Vérifiez "
+                    "BLUESTAR_MACHINE_IMPACTS (ex. « HIGh »), "
+                    "BLUESTAR_MACHINE_CURRENCIES (ex. « EURO » au lieu de "
+                    "« EUR ») et BLUESTAR_WINDOW_*_HOURS."
+                )
+
+    st.markdown("#### î°Å¸¥ Health")
     if health:
         st.json(health)
     else:
         st.info("Aucun health.json disponible.")
 
-    st.markdown("#### ⚡ Circuit breaker")
+    st.markdown("#### î¢Å¡¡ Circuit breaker")
     if state:
         st.json(state)
     else:
         st.info("Aucun _state.json disponible.")
 
-    st.markdown("#### 🧠 Runtime Streamlit")
+    st.markdown("#### î°Å¸§  Runtime Streamlit")
     control = runtime_control()
     st.json({
         "data_dir": str(DATA_DIR),
@@ -1589,7 +1644,7 @@ def render_quality_view(
                     progress,
                     text=(
                         f"Couverture : "
-                        f"{quality.coverage_start_utc} → "
+                        f"{quality.coverage_start_utc} î¢— ’ "
                         f"{quality.coverage_end_utc}"
                     ),
                 )
@@ -1607,16 +1662,16 @@ def render_exports(
     render_section_title("Exports machine", "later", 2)
 
     st.caption(
-        "L’export principal est disponible en permanence dans la barre "
-        "supérieure. Les téléchargements n’appliquent aucun filtre UI et "
-        "sont **l’artefact même publié par l’ingestor** (octets du fichier "
+        "L•â„¢export principal est disponible en permanence dans la barre "
+        "supérieure. Les téléchargements n•â„¢appliquent aucun filtre UI et "
+        "sont **l•â„¢artefact même publié par l•â„¢ingestor** (octets du fichier "
         "`calendar.json` sur disque, tel que le lit le moteur desk)."
     )
 
     legacy_bytes, _legacy_src = serve_legacy_bytes(payload, reference)
     if _legacy_src != "disque":
         st.warning(
-            "⚠️ calendar.json absent sur disque — l'export est une "
+            "î¢Å¡ î¯¸ calendar.json absent sur disque — l'export est une "
             "REGÉNÉRATION de service (horloge de rendu), pas l'artefact "
             "publié. Vérifier que l'ingestor a bien émis."
         )
@@ -1692,7 +1747,7 @@ def _render_application_body(filters: ViewFilters) -> None:
     if first_load or force:
         # [audit OPUS] le spinner n'est plus un clinotement toutes les 10 s
         # qui donnait à voir un « travail » inexistant (lecture locale de
-        # quelques millisecondes) : il n'apparaît que là où une attente est
+        # quelques millisecondes) : il n'apparaît que là o¹ une attente est
         # réelle — premier chargement ou ingestion forcée.
         with st.spinner(
             "Initialisation du calendrier..." if first_load
@@ -1707,31 +1762,84 @@ def _render_application_body(filters: ViewFilters) -> None:
     state = load_state()
 
     if not artifact_available or payload is None:
-        st.markdown("## 🔷 BLUESTAR Economic Calendar")
+        st.markdown("## î°Å¸”· BLUESTAR Economic Calendar")
         st.error(
-            "🚨 Aucun artefact canonique valide n’est disponible."
+            "î°Å¸Å¡¨ Aucun artefact canonique valide n•â„¢est disponible."
         )
 
         runtime = runtime_control()
+
+        # [audit OPUS branche A] Le bloc disait « canonical_exists: true » sans
+        # jamais dire POURQUOI le payload était refusé, ni si l'instance avait
+        # seulement le droit d'aller sur le réseau. Les deux informations qui
+        # designent la cause sont maintenant a l'ecran.
+        canonical_raw = read_json(CANONICAL_PATH)
+        parse_error = _LAST_LOAD_ERROR.get("msg")
+        likely_mismatch = (
+            parse_error is not None
+            and isinstance(canonical_raw, dict)
+            and canonical_raw.get("schema_version") != SCHEMA_VERSION
+        )
 
         st.markdown("### Diagnostic")
         st.json({
             "data_dir": str(DATA_DIR),
             "canonical_path": str(CANONICAL_PATH),
             "canonical_exists": CANONICAL_PATH.exists(),
-            # [OPUS-A] les trois lignes qui manquaient pour trancher :
-            "ingestion_enabled": INGEST_ENABLED,
-            "canonical_schema_version": (
-                (read_json(CANONICAL_PATH) or {}).get("schema_version")
-                if CANONICAL_PATH.exists() else None
+            "canonical_size_bytes": (
+                CANONICAL_PATH.stat().st_size if CANONICAL_PATH.exists() else 0
             ),
-            "app_schema_version": SCHEMA_VERSION,
-            "canonical_parse_error": _LAST_LOAD_ERROR["msg"],
+            "canonical_schema_version": (
+                canonical_raw.get("schema_version")
+                if isinstance(canonical_raw, dict) else None
+            ),
+            "core_schema_version": SCHEMA_VERSION,
+            "canonical_parse_error": parse_error,
+            "ingestion_enabled": INGEST_ENABLED,
             "health_exists": HEALTH_PATH.exists(),
             "state_exists": STATE_PATH.exists(),
             "last_runtime_error": runtime.last_runtime_error,
             "last_ingestion_result_ok": runtime.last_result_ok,
+            "last_cycle_skipped_lock": runtime.last_skipped_locked,
         })
+
+        if parse_error:
+            st.error(
+                "L•â„¢artefact est PRÉSENT mais REFUSÉ par la validation : "
+                f"{parse_error.splitlines()[0][:300]}"
+            )
+            if likely_mismatch:
+                st.error(
+                    "Version de schéma divergente entre l•â„¢artefact sur disque "
+                    "et le calendar_core déployé. Soit le producteur (cron) "
+                    "et cette UI ne tournent pas sur la même release, soit "
+                    "data/ pointe vers les restes d•â„¢une version précédente. "
+                    "Relancer une ingestion depuis cet onglet ou réaligner "
+                    "les deux modules."
+                )
+        elif not artifact_available:
+            if INGEST_ENABLED:
+                st.warning(
+                    "Aucun artefact et aucune ingestion possible : la source "
+                    "n•â„¢est probablement pas jointe (réseau sortant bloqué, "
+                    "proxy), ou BLUESTAR_DATA_DIR pointe hors d•â„¢un répertoire "
+                    "inscriptible."
+                )
+            else:
+                st.warning(
+                    "î°Å¸”’ Cette instance est en mode LECTEUR SEULE "
+                    "(`BLUESTAR_DISABLE_INGEST`) : elle n•â„¢émet AUCUN appel "
+                    "réseau et attend qu•â„¢un producteur externe (cron/systemd) "
+                    "écrive dans le même filesystem. Vérifiez que ce "
+                    "producteur tourne et partage bien ce DATA_DIR : "
+                    f"{DATA_DIR}"
+                )
+        else:
+            st.warning(
+                "L•â„¢artefact est présent et lisible mais ne contient aucun "
+                "événement. Onglet « Qualité » / entonnoir de sélection pour "
+                "le motif (BLUESTAR_MACHINE_IMPACTS, _CURRENCIES, fenêtre)."
+            )
 
         if health:
             st.markdown("### Health")
@@ -1741,24 +1849,9 @@ def _render_application_body(filters: ViewFilters) -> None:
             st.markdown("### Circuit breaker")
             st.json(state)
 
-        # [OPUS-A] En mode lecteur, AUCUN appel réseau n'est tenté : conseiller
-        # de « vérifier le réseau » envoyait l'exploitant sur une fausse piste
-        # pendant que la vraie cause (data/ vide + aucun producteur) restait
-        # invisible. Sur Streamlit Community Cloud le filesystem est éphémère
-        # et aucun cron externe ne peut écrire dans ce conteneur : le mode
-        # lecteur y est structurellement une impasse.
-        if not INGEST_ENABLED:
+        if INGEST_ENABLED:
             st.warning(
-                "Mode LECTEUR actif (BLUESTAR_DISABLE_INGEST) : cette instance "
-                "n'émet aucun appel réseau et attend qu'un producteur externe "
-                "écrive dans " + str(DATA_DIR) + ". Sur Streamlit Community "
-                "Cloud, ce producteur n'existe pas et le disque est éphémère — "
-                "retirez BLUESTAR_DISABLE_INGEST pour que l'application "
-                "alimente elle-même son calendrier."
-            )
-        else:
-            st.warning(
-                "Vérifiez l’accès réseau sortant vers la source, "
+                "Vérifiez l•â„¢accès réseau sortant vers la source, "
                 "les logs Streamlit et la variable BLUESTAR_DATA_DIR."
             )
         return
@@ -1786,11 +1879,11 @@ def _render_application_body(filters: ViewFilters) -> None:
 
     tab_desk, tab_detail, tab_assets, tab_quality, tab_exports = st.tabs(
         [
-            "🎯 Trading Desk",
-            "📋 Détaillée",
-            "🥇 Assets",
-            "🔍 Qualité",
-            "📦 Exports",
+            "î°Å¸Å½¯ Trading Desk",
+            "î°Å¸—¹ Détaillée",
+            "î°Å¸¥—¡ Assets",
+            "î°Å¸” Qualité",
+            "î°Å¸“¦ Exports",
         ]
     )
 
@@ -1838,7 +1931,7 @@ def _render_application_body(filters: ViewFilters) -> None:
     )
 
 
-# Deux fragments distincts : run_every est fixé À LA DÉCORATION, pas à
+# Deux fragments distincts : run_every est fixé â‚¬ LA DÉCORATION, pas à
 # l'exécution — la case « Rafraîchissement visuel » ne pouvait donc rien
 # changer dans la version précédente (les deux branches de main() appelaient
 # le même fragment périodique : contrôle décoratif, audité faux). Le dispatch
@@ -2176,7 +2269,7 @@ def apply_theme() -> None:
 def main() -> None:
     st.set_page_config(
         page_title="BLUESTAR Calendar",
-        page_icon="🔷",
+        page_icon="î°Å¸”·",
         layout="wide",
         initial_sidebar_state="expanded",
     )

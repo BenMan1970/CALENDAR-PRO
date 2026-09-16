@@ -140,32 +140,12 @@ from pydantic import (
 # Try/except : sans le paquet (Windows propre, env exotique), on reste sur le
 # comportement par défaut — tz_environment() le dira honnêtement.
 # ─────────────────────────────────────────────────────────────────────────────
-# [OPUS-TZ 16/09/2026] CORRECTION D'UN GARDE INOPERANT.
-# La version precedente faisait `_zoneinfo.TZPATH = (_d,) + ...`. PEP 615 :
-# cette affectation ne fait que REBINDER l'attribut de module ; le chemin
-# de recherche reellement utilise par ZoneInfo() est interne et n'est
-# modifiable QUE par reset_tzpath(). Mesure avant correction, tzdata pip
-# 2026.4 installe :
-#   TZPATH[0] affiche  -> .../tzdata/zoneinfo   (le diagnostic disait VRAI)
-#   offset observe le 2026-09-21 Africa/Casablanca -> +01:00  (FAUX)
-# Le garde annoncait donc son propre succes tout en laissant le tzdata
-# SYSTEME faire autorite. C'est exactement la panne que le commentaire B2
-# ci-dessus decrit et croyait avoir empechee : heures fausses d'une heure
-# des le 20/09/2026, silencieusement, sur toute la vue.
-# clear_cache() : reset_tzpath() n'invalide pas le cache d'instances
-# ZoneInfo deja construites (PEP 615) ; sans lui, un import indirect
-# anterieur figerait les anciennes regles.
 def _pin_pip_tzdata() -> None:
     try:
         import tzdata as _td
-        _d = os.path.abspath(os.path.join(os.path.dirname(_td.__file__), "zoneinfo"))
-        if not os.path.isdir(_d):
-            return
-        current = [str(p) for p in _zoneinfo.TZPATH]
-        if current and os.path.abspath(current[0]) == _d:
-            return
-        _zoneinfo.ZoneInfo.clear_cache()
-        _zoneinfo.reset_tzpath([_d] + [p for p in current if os.path.abspath(p) != _d])
+        _d = os.path.join(os.path.dirname(_td.__file__), "zoneinfo")
+        if os.path.isdir(_d) and _d not in tuple(_zoneinfo.TZPATH):
+            _zoneinfo.TZPATH = (_d,) + tuple(_zoneinfo.TZPATH)
     except Exception:                                       # noqa: BLE001
         pass
 
@@ -715,6 +695,12 @@ class QualityInfo(BaseModel):
     # ND-013 : horizon court CAUSÉ par le flux semaine suivante non publié =
     # état structurel neutre (flag méta + note), plus un signal d'alerte.
     week_rollover_pending: bool = False
+    # [audit OPUS 16-09-2026, branche B] Comptage des rejets de l'entonnoir de
+    # sélection, par motif. Sans ceci, « 0 événement » est opaque : c'est en
+    # fait « 78 écartés par impact, 27 par fenêtre », immédiatement actionnable.
+    # ADDITIF — ni le statut, ni le score, ni le content_hash n'en dépendent,
+    # donc aucun verrou existant ne bouge.
+    selection_dropped: Dict[str, int] = Field(default_factory=dict)
 
 
 class CoverageInfo(BaseModel):
@@ -1061,15 +1047,8 @@ def build_payload(
     lo = now_utc - timedelta(hours=policy.window_past_hours)
     hi = now_utc + timedelta(hours=policy.window_future_hours)
 
-    # [OPUS-B] Instrumentation de l'entonnoir de selection.
-    # L'invariant B1 ne refuse le VIDE que pour la derive de vocabulaire.
-    # Toute AUTRE cause d'entonnoir vide passait en VALID / score 1.000 /
-    # zero evenement -- artefact publie, et l'aval lit un calendrier vide
-    # comme un fait de marche. Mesure : BLUESTAR_MACHINE_CURRENCIES=EURO
-    # -> 27 lignes normalisees, 0 evenement, VALID 1.000, aucun warning.
-    # On ne DEPLACE PAS le statut (decision de review board ; cela
-    # casserait test_b1_calm_week_without_high_is_legitimately_publishable)
-    # : on NOMME la cause. "0 evenement" devient "27 ecartes par devise".
+    # [audit OPUS 16-09-2026, branche B] Comptage des motifs de rejet : tout
+    # entonnoir vide devient lisible au lieu d'être un « 0 » muet.
     drop = {"impact": 0, "global": 0, "currency": 0, "window": 0}
     selected: List[Dict[str, Any]] = []
     for row in rows:
@@ -1087,12 +1066,6 @@ def build_payload(
             drop["window"] += 1
             continue
         selected.append(row)
-
-    if rows and not selected:
-        warnings.append(
-            "SELECTION_EMPTY:"
-            + ",".join(f"{k}={v}" for k, v in drop.items() if v)
-        )
 
     coverage = _coverage_diagnostics(rows, selected, policy, lo, hi)
 
@@ -1191,6 +1164,16 @@ def build_payload(
             f"COVERAGE_SHORTER_THAN_HORIZON:{horizon_events_h:.1f}h<{policy.soon_hours:.0f}h")
     if not rows:
         warnings.append("EMPTY_NORMALIZED_PAYLOAD")
+    # [audit OPUS branche B] rows>0 mais events=0 SANS dérive de vocabulaire :
+    # ce n'est pas un artefact de parsing, c'est un entonnoir qui a tout écarté.
+    # Le nommer (et non le taire) — sans promouvoir en DEGRADED, ce qui casserait
+    # le verrou test_b1_calm_week_without_high_is_legitimately_publishable
+    # (une semaine sans High est un fait de marché publiable).
+    elif not events:
+        warnings.append(
+            "SELECTION_EMPTY:" + ",".join(f"{k}={v}" for k, v in drop.items())
+            + f" | rows={len(rows)}"
+        )
 
     score = 1.0
     if is_stale:
@@ -1240,6 +1223,7 @@ def build_payload(
         data_quality_score=score,
         warnings=tuple(warnings),
         rejections=tuple(rejections[:50]),
+        selection_dropped=dict(drop),
     )
 
     payload = CalendarPayload(
