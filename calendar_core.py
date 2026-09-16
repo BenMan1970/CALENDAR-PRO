@@ -182,7 +182,7 @@ def tz_environment() -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 # VERSIONS DE CONTRAT — toute rupture doit incrémenter la majeure
 # ─────────────────────────────────────────────────────────────────────────────
-SCHEMA_VERSION = "2.4.1"  # 2.4.1 : audit OPUS — invariant B1 (rejet total vocabulaire → INVALID), autorité tzdata pip (B2), hash de fusion multi-flux aligné sur la formule macro, coverage courte jugée sur EVENTS
+SCHEMA_VERSION = "2.4.1"  # 2.4.1 : audit OPUS — invariant B1 (rejet total vocabulaire → INVALID), autorité tzdata pip (B2), hash de fusion multi-flux aligné sur la formule macro, coverage courte jugée sur EVENTS. v2.5.0 (release) = overlay « actuals » FOREX FACTORY en VUE + helpers de jointure : schéma canonique VOLONTAIREMENT inchangé (le content_hash inter-apps ne doit pas bouger d'un iota quand un actual tombe).
                           # 2.4.0 : PORT calendar_layer v6.1/v6.2 (F2/F3/F5/F6/F7/M3/M4/B8 + vocab horizon compatible) — voir en-tête
                           # 2.3.0 : rollover hebdo neutre (ND-013) — COVERAGE_SHORTER_THAN_HORIZON + DEGRADED seulement si cause anormale ; flag meta week_rollover_pending
                           # 2.1.0 : ajout additif de CoverageInfo (aucune rupture v2.0.0)
@@ -1219,6 +1219,121 @@ def build_payload(
 # mêmes champs, même sérialisation → même calendrier, même hash, quel que
 # soit le fuseau d'affichage, la locale, l'ordre de fusion ou l'horloge.)
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OVERLAY « ACTUALS » — SECONDE SORTIE PUBLIQUE DE FOREX FACTORY
+# Additionnel PAR CONSTRUCTION : ne touche ni au payload canonique, ni au
+# content_hash inter-apps, ni à l'ENGINE. Preuve live du 15/09 : le flux JSON
+# hebdo ne contient AUCUNE clé « actual » (0/105) ; la page publique du
+# calendrier du site FF, elle, embarque un objet JSON
+# (window.calendarComponentStates) dont chaque event porte le même `dateline`
+# (epoch UNIX, indépendant du fuseau d'affichage) que le flux. Jointure :
+# (nom normalisé + devise, dateline ± tolérance) — seul écart observé en
+# live : la minute affinée côté site (Westpac 22:04 vs 22:00 feed = 240 s).
+# On ne réinvente pas la roue : c'est la même maison, sa seconde porte.
+# ─────────────────────────────────────────────────────────────────────────────
+
+FF_ACTUALS_TOLERANCE_S = 360          # ±6 min : mise à jour de minute du site
+
+
+def _balanced_json_object(text: str, start: int) -> Optional[str]:
+    """Extrait l'objet JSON équilibré depuis l'accolade d'index `start`
+    (ignore les accolades des chaînes, gère les échappements)."""
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
+def parse_ff_embedded_calendar(html: str) -> List[Dict[str, Any]]:
+    """Événements embarqués d'une page calendrier du site FF (données serveur
+    `calendarComponentStates`). Les blocs qui ne sont pas des events (jour
+    enveloppe, états de composants) sont ignorés ; un résultat VIDE sur une
+    page qui contenait « timeLabel » signale un changement de structure —
+    l'appelant doit traiter, jamais publier un overlay trompeur."""
+    if '"timeLabel"' not in html:
+        return []
+    events: List[Dict[str, Any]] = []
+    for m in re.finditer(r'\{"[^"]+"\s*:', html):
+        blob = _balanced_json_object(html, m.start())
+        if not blob or len(blob) > 4000:
+            continue
+        if '"timeLabel"' not in blob or '"actual"' not in blob or '"dateline"' not in blob:
+            continue
+        try:
+            e = json.loads(blob)
+        except ValueError:
+            continue
+        if not isinstance(e, dict) or "timeLabel" not in e or not e.get("dateline"):
+            continue
+        events.append({
+            "name": str(e.get("name") or "").strip(),
+            "currency": str(e.get("currency") or "").strip().upper(),
+            "date_label": str(e.get("date") or "").strip(),
+            "time_label": str(e.get("timeLabel") or "").strip(),
+            "dateline": int(e["dateline"]),
+            "actual": str(e.get("actual") or "").strip(),
+            "forecast": str(e.get("forecast") or "").strip(),
+            "previous": str(e.get("previous") or "").strip(),
+            "revision": str(e.get("revision") or "").strip(),
+            "actual_better_worse": e.get("actualBetterWorse"),
+        })
+    return events
+
+
+def build_actuals_index(entries: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """Index par nom normalisé, trié par dateline (déterministe)."""
+    idx: Dict[str, List[Dict[str, Any]]] = {}
+    for e in entries:
+        idx.setdefault(str(e.get("name") or "").strip().lower(), []).append(e)
+    for lst in idx.values():
+        lst.sort(key=lambda x: int(x.get("dateline") or 0))
+    return idx
+
+
+def find_overlay_actual(
+    index: Dict[str, List[Dict[str, Any]]],
+    name: str,
+    scheduled_at_utc: datetime,
+    currency: Optional[str] = None,
+    tolerance_s: int = FF_ACTUALS_TOLERANCE_S,
+) -> Optional[Dict[str, Any]]:
+    """Jointure déterministe : nom + epoch le plus proche sous tolérance ;
+    la devise, présente des deux côtés, DOIT correspondre — les homonymes
+    multi-pays (« Unemployment Rate » GBP ≠ CNY le même jour) ne peuvent pas
+    se marcher dessus. Retourne l'entrée overlay ou None."""
+    cands = index.get((name or "").strip().lower()) or []
+    if not cands:
+        return None
+    target = int(scheduled_at_utc.timestamp())
+    ccy = (currency or "").strip().upper()
+    best: Optional[Any] = None
+    for e in cands:
+        if ccy and e.get("currency") and e["currency"] != ccy:
+            continue
+        d = abs(int(e.get("dateline") or 0) - target)
+        if d <= tolerance_s and (best is None or d < best[0]):
+            best = (d, e)
+    return best[1] if best else None
 
 
 def canonical_content_hash(payload: CalendarPayload) -> str:

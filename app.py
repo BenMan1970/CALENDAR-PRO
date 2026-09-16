@@ -45,8 +45,10 @@ from calendar_core import (
     SelectionPolicy,
     Session,
     TimeProximity,
+    build_actuals_index,
     compute_time_context,
     day_name,                     # [F7 port] table fixe locale-safe
+    find_overlay_actual,
     iso_z,
     pairs_for_currency,
     refresh_time_contexts,
@@ -80,6 +82,7 @@ LEGACY_PATH = DATA_DIR / "calendar.legacy.json"
 CALENDAR_JSON_PATH = DATA_DIR / "calendar.json"   # alias servi au moteur desk
 HEALTH_PATH = DATA_DIR / "health.json"
 STATE_PATH = DATA_DIR / "_state.json"
+ACTUALS_PATH = DATA_DIR / "actuals_overlay.json"   # overlay de VUE v2.5.0
 
 # [B3 audit OPUS] Producteur ou lecteur : en production l'UNIQUE producteur
 # doit être le cron/systemd (mort fragmentaire incluse). BLUESTAR_DISABLE_INGEST
@@ -415,6 +418,36 @@ def load_state() -> Optional[Dict[str, Any]]:
     return raw if isinstance(raw, dict) else None
 
 
+# =============================================================================
+# OVERLAY « ACTUALS » SITE FF (v2.5.0) — VUE SEULE, AUCUN EFFET SUR LE CONTRAT
+# Le flux JSON hebdo ne publie pas les actuals (0/105 clés mesuré le 15/09) ;
+# l'ingesteur les collecte sur la page publique du calendrier FF (données
+# embarquées, même dateline epoch que le flux) dans data/actuals_overlay.json.
+# Fichier absent ou vide → index vide → affichage STRICTEMENT identique à
+# avant : cette brique ne peut rien casser et ne touche ni calendar.json, ni
+# le content_hash inter-apps, ni l'ENGINE.
+# =============================================================================
+@st.cache_data(show_spinner=False)
+def _load_overlay_cached(path_str: str, mtime_ns: int, size: int) -> Dict[str, Any]:
+    try:
+        obj = json.loads(Path(path_str).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def load_actuals_state() -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, Any]]:
+    try:
+        stat = ACTUALS_PATH.stat()
+    except OSError:
+        return {}, {}
+    obj = _load_overlay_cached(str(ACTUALS_PATH), stat.st_mtime_ns, stat.st_size)
+    entries = [e for e in (obj.get("entries") or []) if isinstance(e, dict)]
+    if not entries:
+        return {}, obj
+    return build_actuals_index(entries), obj
+
+
 def file_age_seconds(path: Path, reference: datetime) -> Optional[int]:
     try:
         modified = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
@@ -680,8 +713,16 @@ def format_numeric(value: Any) -> str:
 def render_event_card(
     event: CalendarEvent,
     show_extended_assets: bool,
+    actuals_index: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> None:
     ctx = event.time_context
+    ov = (find_overlay_actual(actuals_index, event.name, event.scheduled_at_utc,
+                              event.currency) if actuals_index else None) or {}
+    actual_note_html = (
+        ' <span class="bs-chip" title="Donnée embarquée de la page publique FF — '
+        'le flux JSON hebdo ne publie pas les actuals">site FF</span>'
+        if ov.get("actual") else ""
+    )
     assets = get_affected_assets(event, extended=show_extended_assets)
 
     impact_text, impact_tone = IMPACT_META.get(
@@ -733,9 +774,12 @@ def render_event_card(
         f'<div class="bs-kv__item"><span class="bs-kv__k">Previous</span>'
         f'<span class="bs-kv__v">{escape(format_numeric(event.previous))}</span></div>'
         f'<div class="bs-kv__item"><span class="bs-kv__k">Actual</span>'
-        f'<span class="bs-kv__v">{escape(format_numeric(event.actual))}</span></div>'
+        f'<span class="bs-kv__v">{escape(ov.get("actual") or format_numeric(event.actual))}'
+        f'{actual_note_html}</span></div>'
         f'<div class="bs-kv__item"><span class="bs-kv__k">Statut</span>'
-        f'<span class="bs-kv__v">{escape(event.actual_status.value)}</span></div>'
+        f'<span class="bs-kv__v">'
+        f'{escape("FF-SITE" if ov.get("actual") else event.actual_status.value)}'
+        f'</span></div>'
         f"</div>"
         f'<div class="bs-assets">{chips}</div>'
         f"{group_line}"
@@ -1112,6 +1156,13 @@ def render_header(
         "OPEN": "crit",
     }.get(circuit_state, "")
 
+    actuals_index, _ov_meta = load_actuals_state()
+    ov_hits = (sum(
+        1 for e in payload.events
+        if (find_overlay_actual(actuals_index, e.name, e.scheduled_at_utc,
+                                e.currency) or {}).get("actual")
+    ) if actuals_index else 0)
+
     render_stat_grid((
         (
             "Qualité",
@@ -1139,9 +1190,12 @@ def render_header(
         ),
         (
             "Actual",
-            "SUPPORTÉ" if payload.source.supports_actual else "ABSENT",
-            payload.numeric_parser_version,
-            "ok" if payload.source.supports_actual else "warn",
+            ("SUPPORTÉ" if payload.source.supports_actual
+             else (f"SITE ×{ov_hits}" if ov_hits else "ABSENT")),
+            (payload.numeric_parser_version if (payload.source.supports_actual
+                                                 or not ov_hits)
+             else "overlay page publique FF (flux JSON sans actual)"),
+            "ok" if (payload.source.supports_actual or ov_hits) else "warn",
         ),
     ))
 
@@ -1194,6 +1248,8 @@ def render_trading_desk(
         )
         return
 
+    actuals_index, _ov_meta = load_actuals_state()
+
     sections = (
         (TimeProximity.IMMINENT, "Événements imminents", "imminent", False),
         (TimeProximity.SOON, "Prochainement", "soon", False),
@@ -1215,10 +1271,10 @@ def render_trading_desk(
         if collapsed:
             with st.expander(f"Afficher {len(subset)} événement(s)", expanded=False):
                 for event in subset:
-                    render_event_card(event, filters.show_assets_extended)
+                    render_event_card(event, filters.show_assets_extended, actuals_index)
         else:
             for event in subset:
-                render_event_card(event, filters.show_assets_extended)
+                render_event_card(event, filters.show_assets_extended, actuals_index)
 
 
 def render_detailed_view(
@@ -1234,8 +1290,11 @@ def render_detailed_view(
         return
 
     rows: List[Dict[str, Any]] = []
+    actuals_index, _ov_meta = load_actuals_state()
 
     for event in events:
+        ov = (find_overlay_actual(actuals_index, event.name, event.scheduled_at_utc,
+                                  event.currency) if actuals_index else None) or {}
         assets = get_affected_assets(
             event,
             extended=filters.show_assets_extended,
@@ -1257,8 +1316,10 @@ def render_detailed_view(
             "Countdown": event.time_context.hours_until_display,
             "Prévision": format_numeric(event.forecast),
             "Précédent": format_numeric(event.previous),
-            "Réel": format_numeric(event.actual),
-            "Actual status": event.actual_status.value,
+            "Réel": (f'{ov["actual"]} · site FF' if ov.get("actual")
+                     else format_numeric(event.actual)),
+            "Actual status": ("FF-SITE" if ov.get("actual")
+                              else event.actual_status.value),
             "Assets": assets_display,
             "Groupe": (
                 event.release_group_type.value
@@ -1404,6 +1465,14 @@ def render_quality_view(
     with col2:
         st.markdown("#### 🔗 Source")
         st.json(payload.source.model_dump(mode="json"))
+        _, ov_meta = load_actuals_state()
+        if ov_meta.get("entries"):
+            st.caption(
+                f"Overlay actuals (vue, v2.5.0) : {len(ov_meta['entries'])} entrée(s) "
+                f"collectée(s) sur la page publique FF — collecte "
+                f"{ov_meta.get('fetched_at_utc')} · jointure nom+dateline ±6 min. "
+                f"Le flux JSON hebdo lui-même ne publie toujours aucun actual."
+            )
 
     st.markdown("#### 🏥 Health")
     if health:

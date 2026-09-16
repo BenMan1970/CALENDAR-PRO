@@ -29,7 +29,7 @@ import signal
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -45,6 +45,7 @@ from calendar_core import (
     SourceInfo,
     build_payload,
     iso_z,
+    parse_ff_embedded_calendar,
     sha256_hex,
     to_legacy_payload,
     tz_environment,
@@ -69,6 +70,31 @@ SOURCE_URL_NEXT = os.getenv(
 )
 SOURCE_PROVIDER = "Forex Factory / Fair Economy weekly public feed"
 USER_AGENT = os.getenv("BLUESTAR_USER_AGENT", "BluestarCalendarIngestor/2.0 (+ops@bluestar)")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OVERLAY « ACTUALS » — SECONDE PORTE PUBLIQUE DE FOREX FACTORY (v2.5.0).
+# Le flux JSON hebdo ne publie pas les actuals (mesuré 0/105 clés le 15/09) ;
+# la page publique du calendrier du site FF, elle, les embarque (objet serveur
+# window.calendarComponentStates) avec le MÊME dateline epoch que le flux.
+# Ce fichier est un ADDITIF DE VUE : calendar.json, le content_hash inter-apps
+# et l'ENGINE restent strictement inchangés. Source unique = FF : on ne
+# réinvente pas la roue, on prend la donnée là où la maison la publie.
+# ─────────────────────────────────────────────────────────────────────────────
+FF_CALENDAR_PAGE = os.getenv("BLUESTAR_FF_CALENDAR_PAGE",
+                             "https://www.forexfactory.com/calendar")
+# Le site sert ses pages selon l'UA (mur anti-bot occasionnel sur UA custom) ;
+# cet habillage navigateur est spécifique à la page publique, le flux JSON
+# garde USER_AGENT d'origine (comportement prouvé inchangé).
+FF_PAGE_UA = os.getenv(
+    "BLUESTAR_FF_PAGE_UA",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+ACTUALS_REFRESH_S = int(os.getenv("BLUESTAR_ACTUALS_REFRESH", "900"))
+ACTUALS_FETCH_DEADLINE_S = float(os.getenv("BLUESTAR_ACTUALS_DEADLINE_S", "45"))
+ACTUALS_OVERVIEW_NAME = "actuals_overlay.json"
+# 'off' désactive totalement la collecte (pas de requête vers le site).
+DISABLE_ACTUALS = (os.getenv("BLUESTAR_DISABLE_ACTUALS", "") or "").strip().lower() in {
+    "1", "true", "yes", "on"}
 
 
 def _anchor_data_dir(value: str) -> Path:
@@ -423,17 +449,166 @@ def _fetch_source_blocking(session: requests.Session, url: str,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# OVERLAY ACTUALS — IMPLÉMENTATION (v2.5.0, vue seule ; contrat inchangé)
+# ─────────────────────────────────────────────────────────────────────────────
+_MONTHS_LOWER = ("jan", "feb", "mar", "apr", "may", "jun",
+                 "jul", "aug", "sep", "oct", "nov", "dec")
+
+
+def ff_day_url(day: datetime, page: Optional[str] = None) -> str:
+    """URL publique du calendrier FF pour un jour : « …?day=sep15.2026 ».
+    Format figé à dessein (sans strftime locale-dépendant : « sept. » sous
+    locale française casserait silencieusement toute collecte)."""
+    base = (page or FF_CALENDAR_PAGE).rstrip("/")
+    return f"{base}?day={_MONTHS_LOWER[day.month - 1]}{day.day:02d}.{day.year}"
+
+
+def _fetch_ff_page_blocking(session: requests.Session, url: str) -> str:
+    headers = {"User-Agent": FF_PAGE_UA, "Accept": "text/html,application/xhtml+xml"}
+    try:
+        response = session.get(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), headers=headers)
+    except requests.Timeout as exc:
+        raise FetchError("NETWORK_TIMEOUT", str(exc)) from exc
+    except requests.RequestException as exc:
+        raise FetchError("NETWORK_ERROR", str(exc)) from exc
+    with response:
+        if response.status_code >= 400:
+            raise FetchError("HTTP_ERROR", f"status={response.status_code}")
+        body = response.content
+        if len(body) > MAX_PAYLOAD_BYTES:
+            raise FetchError("PAYLOAD_TOO_LARGE", f"{len(body)} bytes")
+    return body.decode("utf-8", errors="replace")
+
+
+def fetch_ff_page(session: requests.Session, url: str) -> str:
+    """Plafond dur au temps mural (même doctrine H7 que fetch_source)."""
+    outcome: Dict[str, Any] = {}
+
+    def _worker() -> None:
+        try:
+            outcome["value"] = _fetch_ff_page_blocking(session, url)
+        except BaseException as exc:                          # noqa: BLE001
+            outcome["error"] = exc
+
+    th = threading.Thread(target=_worker, daemon=True, name="bluestar-ffpage")
+    th.start()
+    th.join(max(1.0, ACTUALS_FETCH_DEADLINE_S))
+    if th.is_alive():
+        raise FetchError("FETCH_DEADLINE_EXCEEDED", f">{ACTUALS_FETCH_DEADLINE_S:.0f}s (ff page)")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
+def _actuals_summary_from_file(path: Path) -> Dict[str, Any]:
+    obj = read_json(path)
+    if not isinstance(obj, dict):
+        return {"exists": False}
+    entries = obj.get("entries") or []
+    return {
+        "exists": True,
+        "fetched_at_utc": obj.get("fetched_at_utc"),
+        "entries": len(entries),
+        "with_actual": sum(1 for e in entries if isinstance(e, dict) and e.get("actual")),
+    }
+
+
+def refresh_actuals_overlay(data_dir: Path, session: requests.Session,
+                            now: datetime) -> Dict[str, Any]:
+    """Collecte les actuals embarqués dans les pages publiques du site FF pour
+    les jours écoulés de la semaine (lundi → aujourd'hui, 7 max) et écrit
+    `data/actuals_overlay.json` (atomique). JAMAIS bloquant : tout échec
+    network/structure conserve le fichier précédent et ne touche pas au cycle
+    principal. Un fichier PARTIELlement reconstruit n'est jamais publié comme
+    si tout était à jour : pages_failed est tracé dans l'artefact."""
+    overlay_path = data_dir / ACTUALS_OVERVIEW_NAME
+    if DISABLE_ACTUALS:
+        summary = _actuals_summary_from_file(overlay_path)
+        summary["disabled"] = True
+        return summary
+    try:
+        age = now.timestamp() - overlay_path.stat().st_mtime
+    except OSError:
+        age = None
+    # Gate de fraîcheur : ACTUALS_REFRESH_S <= 0 le désactive explicitement
+    # (sinon un âge mesuré négatif — horloge Windows grossière — satisferait
+    # « age < 0 » et gèlerait la collecte indéfiniment).
+    if ACTUALS_REFRESH_S > 0 and age is not None and age < ACTUALS_REFRESH_S:
+        # age < 0 = mtime « dans le futur » : un fichier qui vient de naître
+        # est, par définition, frais.
+        summary = _actuals_summary_from_file(overlay_path)
+        summary["skipped_fresh"] = True
+        return summary
+
+    monday = (now - timedelta(days=now.weekday())).date()
+    days = [monday + timedelta(d) for d in range((now.date() - monday).days + 1)]
+    collected: Dict[Any, Dict[str, Any]] = {}
+    pages_ok: List[str] = []
+    pages_failed: List[str] = []
+    for day in days:
+        url = ff_day_url(day)
+        try:
+            html = fetch_ff_page(session, url)
+        except FetchError as exc:
+            pages_failed.append(f"{day.isoformat()}:{getattr(exc, 'code', 'ERR')}")
+            continue
+        events = parse_ff_embedded_calendar(html)
+        if not events and '"timeLabel"' in html:
+            # page présente mais structure méconnue : on ne publie RIEN de
+            # trompeur, l'ancien overlay reste la vérité du dernier état lu.
+            pages_failed.append(f"{day.isoformat()}:STRUCTURE_CHANGED")
+            LOG.error("structure page FF inconnue (%s) — overlay non modifié", day)
+            continue
+        pages_ok.append(day.isoformat())
+        for e in events:
+            collected[(e["name"].lower(), e["dateline"])] = e
+
+    summary: Dict[str, Any] = {
+        "exists": overlay_path.exists(),
+        "pages_ok": pages_ok,
+        "pages_failed": pages_failed,
+    }
+    if not pages_ok:
+        summary["kept_previous"] = True
+        summary.update(_actuals_summary_from_file(overlay_path))
+        LOG.warning("overlay actuals : aucune page exploitable (%s) — fichier antérieur conservé",
+                    ", ".join(pages_failed) or "?")
+        return summary
+
+    entries = sorted(collected.values(), key=lambda e: (e["dateline"], e["name"]))
+    atomic_write_json(overlay_path, {
+        "schema_version": "actuals-1.0.0",
+        "source": "Forex Factory — embedded data of the public calendar pages",
+        "source_pages": [ff_day_url(datetime(d.year, d.month, d.day, tzinfo=timezone.utc))
+                         for d in days if d.isoformat() in pages_ok],
+        "fetched_at_utc": iso_z(now),
+        "join_key": "(name.lower(), dateline epoch UTC) ± 360 s — devise contrôlée",
+        "pages_ok": pages_ok,
+        "pages_failed": pages_failed,
+        "entries": entries,
+    })
+    summary["entries"] = len(entries)
+    summary["with_actual"] = sum(1 for e in entries if e["actual"])
+    summary["fetched_at_utc"] = iso_z(now)
+    summary["exists"] = True
+    LOG.info("overlay actuals: %d entrées (%d avec actual) depuis %d page(s)",
+             summary["entries"], summary["with_actual"], len(pages_ok))
+    return summary
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CYCLE D'INGESTION
 # ─────────────────────────────────────────────────────────────────────────────
 def write_health(data_dir: Path, state: IngestorState, now: datetime,
-                 payload: Optional[CalendarPayload], error: Optional[str]) -> None:
+                 payload: Optional[CalendarPayload], error: Optional[str],
+                 actuals_info: Optional[Dict[str, Any]] = None) -> None:
     if payload is None:
         status = "UNAVAILABLE"
     else:
         status = payload.quality.status.value
 
     atomic_write_json(data_dir / "health.json", {
-        "schema_version": "health-1.1.0",
+        "schema_version": "health-1.2.0",
         "core_schema_version": SCHEMA_VERSION,
         "status": status,
         "checked_at_utc": iso_z(now),
@@ -460,6 +635,8 @@ def write_health(data_dir: Path, state: IngestorState, now: datetime,
         "feeds_status": dict(payload.source.feed_status) if payload else {},
         "feed_sha256": dict(payload.source.feed_sha256) if payload else {},
         "tz": tz_environment(),
+        # v2.5.0 : état de l'overlay actuals (vue seule ; jamais bloquant).
+        "actuals_overlay": actuals_info,
     })
 
 
@@ -648,7 +825,15 @@ def _run_once_impl(data_dir: Path, policy: SelectionPolicy, session: requests.Se
     state.last_content_hash = payload.content_hash
     state.last_publish_utc = iso_z(now)
     state.save()
-    write_health(data_dir, state, now, payload, error)
+    # v2.5.0 — overlay actuals APRÈS publication réussie, JAMAIS bloquant :
+    # une panne site n'a aucune prise sur le cycle principal (le contrat
+    # canonique, lui, est déjà publié et vérifié).
+    try:
+        actuals_info = refresh_actuals_overlay(data_dir, session, now)
+    except Exception as exc:                                   # noqa: BLE001
+        LOG.exception("overlay actuals — échec inattendu, cycle principal intact")
+        actuals_info = {"error": f"UNEXPECTED: {type(exc).__name__}"}
+    write_health(data_dir, state, now, payload, error, actuals_info)
 
     LOG.info(
         "published %d events | status=%s | score=%.2f | content_%s | hash=%s",
