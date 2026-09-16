@@ -32,7 +32,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import requests
+# v2.5.2 (audit OPUS A7) — `import requests` était mort dans app.py : aucun
+# appel direct, build_session() vit dans calendar_ingestor. Chaque import mort
+# consomme du quota de démarrage et ralentit le cold boot Streamlit.
 import streamlit as st
 
 from calendar_core import (
@@ -60,7 +62,7 @@ from calendar_ingestor import (
     build_session,
     publish_lock_held,
     run_once,
-    _anchor_data_dir,
+    anchor_data_dir,            # v2.5.2 (audit OPUS A7) : nom public
 )
 
 # H3 (audit 2026-09-11) : le verrou inter-processus vit dans run_once — que
@@ -122,7 +124,18 @@ def env_int(name: str, default: int) -> int:
 
 # H2 : ancré sur le dossier d'installation (plus sur le cwd) — sinon deux cwd
 # = deux jeux d'artefacts parallèles silencieux entre cron et Streamlit.
-DATA_DIR = _anchor_data_dir(env_str("BLUESTAR_DATA_DIR", "data"))
+# v2.5.2 (audit OPUS A7) : nom public importé depuis calendar_ingestor.
+DATA_DIR = anchor_data_dir(env_str("BLUESTAR_DATA_DIR", "data"))
+
+# v2.5.2 (audit OPUS R7) — semence d'affichage versionnée. Sur Streamlit
+# Community Cloud, le filesystem est éphémère : data/ est vide à chaque cold
+# boot. La semence est le dernier recours d'AFFICHAGE (lecture seule, jamais
+# exportée sous le nom calendar.json) — elle évite l'écran vide tant que
+# l'ingestion de fond ne publie pas un artefact réel.
+SEED_RELATIVE = Path(__file__).resolve().parent / "seed" / "calendar.latest.seed.json"
+# Cadence d'amorçage : pendant le bootstrap, on veut voir l'artefact atterrir
+# en quelques secondes, pas en dix. Coût d'un tick de lecture locale ~1 ms.
+BOOTSTRAP_REFRESH_SECONDS = 3
 
 CANONICAL_PATH = DATA_DIR / "calendar.latest.json"
 LEGACY_PATH = DATA_DIR / "calendar.legacy.json"
@@ -337,6 +350,10 @@ class RuntimeControl:
 
     Le verrou empêche plusieurs utilisateurs de lancer simultanément
     l'ingestor sur les mêmes fichiers.
+
+    v2.5.2 (audit OPUS A1) — l'ingestion tourne dans un thread daemon
+    séparé. Le rendu Streamlit ne l'attend PLUS. `ingest_thread` est le
+    handle de ce worker ; `worker_alive()` expose sa vivacité à l'UI.
     """
 
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -348,11 +365,27 @@ class RuntimeControl:
     # tableau de bord annonçait une panne pendant qu'un cron travaillait.
     last_skipped_locked: bool = False
     last_runtime_error: Optional[str] = None
+    # v2.5.2 (audit OPUS A1) — handle du worker d'ingestion de fond.
+    ingest_thread: Optional[threading.Thread] = None
+
+    def worker_alive(self) -> bool:
+        """True si un cycle d'ingestion est en cours en arrière-plan."""
+        return self.ingest_thread is not None and self.ingest_thread.is_alive()
 
 
-@st.cache_resource
+# v2.5.2 (audit OPUS A1) — Singleton module-level (pas @st.cache_resource).
+# En mode test (AppTest direct ou hors runtime Streamlit), @st.cache_resource
+# ne cache rien — chaque appel créait une nouvelle instance, cassant la
+# coordination entre kick_ingestion et le rendu. Le singleton résout ça
+# proprement, en production comme en test.
+_RUNTIME_CONTROL: Optional[RuntimeControl] = None
+
+
 def runtime_control() -> RuntimeControl:
-    return RuntimeControl()
+    global _RUNTIME_CONTROL
+    if _RUNTIME_CONTROL is None:
+        _RUNTIME_CONTROL = RuntimeControl()
+    return _RUNTIME_CONTROL
 
 
 @st.cache_resource
@@ -437,6 +470,11 @@ _LAST_LOAD_ERROR: Dict[str, Optional[str]] = {"msg": None}
 
 @st.cache_data(show_spinner=False)
 def _load_payload_cached(path_str: str, mtime_ns: int, size: int) -> Optional[CalendarPayload]:
+    # v2.5.2 (audit OPUS A5) — vider AU DÉBUT, pas à la fin. Sans ceci,
+    # `@st.cache_data` court-circuite le corps au second appel (clé
+    # inchangée) et laisse `_LAST_LOAD_ERROR` à sa valeur précédente —
+    # l'écran affichait une erreur périmée même après réparation du fichier.
+    _LAST_LOAD_ERROR["msg"] = None
     raw = read_json(Path(path_str))
     if raw is None:
         _LAST_LOAD_ERROR["msg"] = "JSON illisible ou absent"
@@ -447,7 +485,6 @@ def _load_payload_cached(path_str: str, mtime_ns: int, size: int) -> Optional[Ca
         _LAST_LOAD_ERROR["msg"] = f"{type(exc).__name__}: {exc}"
         LOG.exception("Invalid canonical artifact: %s", exc)
         return None
-    _LAST_LOAD_ERROR["msg"] = None
     return payload
 
 
@@ -459,6 +496,64 @@ def load_health() -> Optional[Dict[str, Any]]:
 def load_state() -> Optional[Dict[str, Any]]:
     raw = read_json(STATE_PATH)
     return raw if isinstance(raw, dict) else None
+
+
+def load_seed() -> Tuple[Optional[CalendarPayload], Optional[Path]]:
+    """v2.5.2 (audit OPUS R7) — charge la semence d'affichage versionnée.
+    Dernier recours d'AFFICHAGE quand data/ est vide. Jamais exportée sous
+    le nom calendar.json (le contrat est la production par l'ingestor).
+
+    Cherche en deux endroits (le premier trouvé gagne) :
+      1. <DATA_DIR>/seed/calendar.latest.seed.json — utile en tests où
+         data_dir est un tmp_path fourni par pytest.
+      2. <install_dir>/seed/calendar.latest.seed.json (SEED_RELATIVE) —
+         chemin de production, commité dans le dépôt.
+    """
+    candidates = [
+        DATA_DIR / "seed" / "calendar.latest.seed.json",
+        SEED_RELATIVE,
+    ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        payload_dict = doc.get("payload") if isinstance(doc, dict) else None
+        if not isinstance(payload_dict, dict):
+            continue
+        try:
+            return CalendarPayload.model_validate(payload_dict), path
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("seed unreadable (%s): %s", path, exc)
+            continue
+    return None, None
+
+
+def rate_limit_view(state: Optional[Dict[str, Any]],
+                    now: datetime) -> Dict[str, Any]:
+    """v2.5.2 (audit OPUS A4) — projette l'état de quota pour l'UI."""
+    if not state or not state.get("rate_limited_until"):
+        return {"limited": False, "remaining": 0, "hits": 0}
+    try:
+        until = datetime.fromisoformat(
+            state["rate_limited_until"].replace("Z", "+00:00"))
+        rem = int((until - now).total_seconds())
+    except (ValueError, TypeError):
+        return {"limited": False, "remaining": 0,
+                "hits": int(state.get("rate_limit_hits", 0))}
+    return {"limited": rem > 0, "remaining": max(0, rem),
+            "hits": int(state.get("rate_limit_hits", 0))}
+
+
+def _reset_filter_state() -> None:
+    """v2.5.2 (audit OPUS A6) — purge l'état de session lié aux filtres UI
+    sans toucher au reste (refresh_request, clés externes, etc.)."""
+    keys = list(st.session_state.keys())
+    for key in keys:
+        if key.startswith("impact_") or key.startswith("currency_"):
+            del st.session_state[key]
 
 
 # =============================================================================
@@ -515,16 +610,24 @@ def should_attempt_ingestion(reference: datetime, force: bool = False) -> bool:
     return age is None or age >= INGEST_INTERVAL_SECONDS
 
 
-def ensure_artifacts(force: bool = False) -> bool:
-    """
-    Exécute au maximum une ingestion par intervalle et par processus.
+def kick_ingestion(force: bool = False) -> bool:
+    """v2.5.2 (audit OPUS A1) — l'ingestion tourne dans un thread daemon,
+    séparé du thread de rendu Streamlit. Le rendu n'attend PLUS le réseau :
+    un fetch de 90 s valait 90 s d'écran blanc — et sur Streamlit Cloud,
+    le navigateur ou le health check peut renoncer avant.
+
+    Comportement :
+      • si un cycle est déjà en cours, retourne immédiatement (l'UI lit le
+        dernier artefact publié) ;
+      • sinon, démarre un worker daemon qui appelle run_once ;
+      • le worker ne survit jamais au cycle (daemon attrape toutes les
+        exceptions et publie l'erreur dans RuntimeControl).
 
     En cas d'échec :
       • calendar_ingestor conserve l'ancien artefact ;
       • health.json expose l'erreur ;
       • l'UI continue d'afficher le last-known-good disponible.
     """
-    reference = now_utc()
     control = runtime_control()
 
     # [B3 audit OPUS] mode lecteur pur : aucun appel réseau sortant depuis
@@ -532,89 +635,80 @@ def ensure_artifacts(force: bool = False) -> bool:
     if not INGEST_ENABLED:
         return CANONICAL_PATH.exists()
 
-    if not should_attempt_ingestion(reference, force=force):
+    if control.worker_alive():
+        return CANONICAL_PATH.exists()
+
+    reference = now_utc()
+    if not force and not should_attempt_ingestion(reference, force=force):
         return CANONICAL_PATH.exists()
 
     elapsed = time.monotonic() - control.last_attempt_monotonic
-    if (
-        not force
-        and control.last_attempt_monotonic > 0
-        and elapsed < INGEST_INTERVAL_SECONDS
-    ):
+    if (not force and control.last_attempt_monotonic > 0
+            and elapsed < INGEST_INTERVAL_SECONDS):
         return CANONICAL_PATH.exists()
 
     acquired = control.lock.acquire(blocking=False)
     if not acquired:
-        # Une autre session effectue déjà l'ingestion.
         return CANONICAL_PATH.exists()
 
-    try:
-        # Double vérification après acquisition du verrou.
-        reference = now_utc()
-        elapsed = time.monotonic() - control.last_attempt_monotonic
+    def _bg_worker(ctrl: RuntimeControl, forced: bool) -> None:
+        try:
+            reference = now_utc()
+            elapsed = time.monotonic() - ctrl.last_attempt_monotonic
+            if (not forced and ctrl.last_attempt_monotonic > 0
+                    and elapsed < INGEST_INTERVAL_SECONDS):
+                return
+            if not should_attempt_ingestion(reference, force=forced):
+                return
 
-        if (
-            not force
-            and control.last_attempt_monotonic > 0
-            and elapsed < INGEST_INTERVAL_SECONDS
-        ):
-            return CANONICAL_PATH.exists()
+            ctrl.last_attempt_monotonic = time.monotonic()
+            ctrl.last_attempt_utc = reference
+            ctrl.last_runtime_error = None
 
-        if not should_attempt_ingestion(reference, force=force):
-            return CANONICAL_PATH.exists()
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-        control.last_attempt_monotonic = time.monotonic()
-        control.last_attempt_utc = reference
-        control.last_runtime_error = None
+            LOG.info("Starting ingestion | force=%s | data_dir=%s",
+                     forced, DATA_DIR)
 
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-        LOG.info(
-            "Starting ingestion | force=%s | data_dir=%s",
-            force,
-            DATA_DIR,
-        )
-
-        payload = run_once(
-            data_dir=DATA_DIR,
-            policy=MACHINE_POLICY,
-            session=build_session(),   # [B4] session jetable par cycle
-        )
-
-        control.last_result_ok = payload is not None
-
-        if payload is None:
-            control.last_skipped_locked = publish_lock_held(DATA_DIR)
-            if control.last_skipped_locked:
-                LOG.info(
-                    "Ingestion SKIPPÉE — verrou d'édition détenu par un "
-                    "autre producteur (cron ?) ; les artefacts sur disque "
-                    "restent la vérité affichée"
-                )
-            else:
-                LOG.error(
-                    "Ingestion produced no publishable payload; "
-                    "previous artifact remains untouched"
-                )
-        else:
-            control.last_skipped_locked = False
-            LOG.info(
-                "Ingestion complete | events=%d | quality=%s | hash=%s",
-                len(payload.events),
-                payload.quality.status.value,
-                payload.content_hash,
+            payload = run_once(
+                data_dir=DATA_DIR,
+                policy=MACHINE_POLICY,
+                session=build_session(),   # [B4] session jetable par cycle
             )
 
-        return CANONICAL_PATH.exists()
+            ctrl.last_result_ok = payload is not None
+            if payload is None:
+                ctrl.last_skipped_locked = publish_lock_held(DATA_DIR)
+                if ctrl.last_skipped_locked:
+                    LOG.info("Ingestion SKIPPÉE — verrou d'édition détenu "
+                             "par un autre producteur (cron ?)")
+                else:
+                    LOG.error("Ingestion produced no publishable payload")
+            else:
+                ctrl.last_skipped_locked = False
+                LOG.info("Ingestion complete | events=%d | quality=%s | "
+                         "hash=%s", len(payload.events),
+                         payload.quality.status.value, payload.content_hash)
+        except Exception as exc:  # ultime barrière UI
+            ctrl.last_result_ok = False
+            ctrl.last_runtime_error = f"{type(exc).__name__}: {exc}"
+            LOG.exception("Unhandled ingestion orchestration error")
+        finally:
+            ctrl.lock.release()
 
-    except Exception as exc:  # ultime barrière UI
-        control.last_result_ok = False
-        control.last_runtime_error = f"{type(exc).__name__}: {exc}"
-        LOG.exception("Unhandled ingestion orchestration error")
-        return CANONICAL_PATH.exists()
+    th = threading.Thread(target=_bg_worker, args=(control, force),
+                          daemon=True, name="bluestar-ingest-bg")
+    control.ingest_thread = th
+    th.start()
+    # v2.5.2 (audit OPUS A1) — on retourne True dès que le worker est lancé,
+    # même si l'artefact n'est pas encore sur disque. C'est ce qui permet à
+    # l'UI de ne pas afficher un écran rouge pendant l'ingestion initiale.
+    return True
 
-    finally:
-        control.lock.release()
+
+# v2.5.2 (audit OPUS A1) — alias de compatibilité. La sémantique change :
+# désormais non bloquant.
+ensure_artifacts = kick_ingestion
 
 
 # =============================================================================
@@ -898,6 +992,7 @@ def build_legacy_bytes(
 def serve_legacy_bytes(
     payload: CalendarPayload,
     reference: datetime,
+    is_seed: bool = False,
 ) -> Tuple[bytes, str]:
     """[audit OPUS] Le téléchargement sert l'artefact SUR DISQUE — l'octet
     pour l'octet ce que le moteur du desk consomme — et non une regénération
@@ -905,7 +1000,13 @@ def serve_legacy_bytes(
     fichier téléchargé n'était jamais celui publié, alors que la légende le
     promettait). Repli sur regénération uniquement si le fichier manque
     (dev/test hors pipeline), et la légende le dit.
-    Retourne (octets, provenance : « disque » | « regénéré »)."""
+    Retourne (octets, provenance : « disque » | « regénéré » | « indisponible »).
+
+    v2.5.2 (audit OPUS A3) — is_seed=True : la semence n'est JAMAIS exportée
+    sous le nom calendar.json. On retourne (b"", "indisponible").
+    """
+    if is_seed:
+        return b"", "indisponible"
     try:
         disk = CALENDAR_JSON_PATH.read_bytes()
         if disk:
@@ -919,12 +1020,20 @@ def render_command_bar(
     payload: CalendarPayload,
     reference: datetime,
     visible_count: int,
+    is_seed: bool = False,
 ) -> None:
     """
     Barre de commande persistante en haut de page.
     L'export canonique n'est plus enfoui dans un onglet.
+
+    v2.5.2 (audit OPUS A3) — is_seed: la semence n'est JAMAIS exportée
+    sous le nom calendar.json. Le bouton de téléchargement est masqué,
+    une banderole « SOURCE : SEMENCE FIGÉE » est affichée à la place.
     """
-    legacy_bytes, _legacy_src = serve_legacy_bytes(payload, reference)
+    if is_seed:
+        legacy_bytes, _legacy_src = b"", "indisponible"
+    else:
+        legacy_bytes, _legacy_src = serve_legacy_bytes(payload, reference)
     quality_text, _tone = QUALITY_META.get(
         payload.quality.status,
         (payload.quality.status.value, ""),
@@ -1183,7 +1292,15 @@ def render_header(
     health: Optional[Dict[str, Any]],
     state: Optional[Dict[str, Any]],
     reference: datetime,
+    is_seed: bool = False,
 ) -> None:
+    if is_seed:
+        st.warning(
+            "🌱 SOURCE : SEMENCE FIGÉE — les données affichées sont un "
+            "instantané versionné au moment du commit. L'ingestion de "
+            "fond va remplacer cet écran par un artefact réel dès qu'un "
+            "cycle réussit."
+        )
     source_age = max(
         0,
         int(
@@ -1603,8 +1720,17 @@ def render_exports(
     payload: CalendarPayload,
     health: Optional[Dict[str, Any]],
     reference: datetime,
+    is_seed: bool = False,
 ) -> None:
     render_section_title("Exports machine", "later", 2)
+    if is_seed:
+        st.warning(
+            "⚠️ SOURCE : SEMENCE FIGÉE — l'export calendar.json est "
+            "indisponible tant qu'aucun artefact réel n'a été publié. "
+            "La semence est un artefact d'AFFICHAGE, pas un contrat "
+            "de production (son content_hash n'engage que la lecture)."
+        )
+        return
 
     st.caption(
         "L’export principal est disponible en permanence dans la barre "
@@ -1684,167 +1810,158 @@ def consume_manual_refresh_request() -> bool:
     return True
 
 
+def render_bootstrap_panel(
+    health: Optional[Dict[str, Any]],
+    state: Optional[Dict[str, Any]],
+    reference: datetime,
+) -> None:
+    """v2.5.2 (audit OPUS R7) — panneau affiché quand il n'y a NI artefact
+    canonique NI semence. Explique pourquoi et indique que l'ingestion de
+    fond est en cours."""
+    st.markdown("## 🔷 BLUESTAR Economic Calendar")
+    runtime = runtime_control()
+    rl_view = rate_limit_view(state, reference) if state else {"limited": False}
+    if rl_view.get("limited"):
+        st.info(
+            f"⏳ Source en cooldown de quota ({rl_view['remaining']}s "
+            f"restant, {rl_view['hits']} hit(s) au compteur). Le cycle de "
+            "fond reprend dès que le cooldown expire."
+        )
+    elif runtime.worker_alive():
+        st.info(
+            "⏳ Ingestion en vol — premier cycle en cours. Cet écran se "
+            "remplace dès qu'un artefact est publié."
+        )
+    elif runtime.last_skipped_locked:
+        st.info(
+            "⏳ Un autre producteur (cron ?) détient le verrou d'édition. "
+            "Les artefacts sur disque restent la vérité affichée."
+        )
+    elif not INGEST_ENABLED:
+        st.warning(
+            "Mode LECTEUR actif (BLUESTAR_DISABLE_INGEST) sans artefact sur "
+            "disque ni semence versionnée. Sur Streamlit Community Cloud, "
+            "le disque est éphémère et aucun cron externe ne peut écrire "
+            "dans ce conteneur. Retirez BLUESTAR_DISABLE_INGEST pour que "
+            "l'application alimente elle-même son calendrier, et "
+            "commitez `seed/calendar.latest.seed.json` pour amorcer le "
+            "premier boot."
+        )
+    else:
+        st.error(
+            "🚨 Aucun artefact canonique valide ni semence. L'ingestion "
+            "de fond va retenter. Vérifiez les logs et BLUESTAR_DATA_DIR."
+        )
+
+    st.markdown("### Diagnostic")
+    st.json({
+        "data_dir": str(DATA_DIR),
+        "canonical_path": str(CANONICAL_PATH),
+        "canonical_exists": CANONICAL_PATH.exists(),
+        "seed_path": str(SEED_RELATIVE),
+        "seed_exists": SEED_RELATIVE.exists(),
+        "ingestion_enabled": INGEST_ENABLED,
+        "ingest_worker_alive": runtime.worker_alive(),
+        "canonical_schema_version": (
+            (read_json(CANONICAL_PATH) or {}).get("schema_version")
+            if CANONICAL_PATH.exists() else None
+        ),
+        "app_schema_version": SCHEMA_VERSION,
+        "canonical_parse_error": _LAST_LOAD_ERROR["msg"],
+        "health_exists": HEALTH_PATH.exists(),
+        "state_exists": STATE_PATH.exists(),
+        "rate_limit_view": rl_view,
+        "last_runtime_error": runtime.last_runtime_error,
+        "last_ingestion_result_ok": runtime.last_result_ok,
+        "last_cycle_skipped_lock": runtime.last_skipped_locked,
+    })
+
+    if health:
+        st.markdown("### Health")
+        st.json(health)
+    if state:
+        st.markdown("### Circuit breaker & quota")
+        st.json(state)
+
+
 def _render_application_body(filters: ViewFilters) -> None:
     reference = now_utc()
     force = consume_manual_refresh_request()
 
-    first_load = not CANONICAL_PATH.exists()
-    if first_load or force:
-        # [audit OPUS] le spinner n'est plus un clinotement toutes les 10 s
-        # qui donnait à voir un « travail » inexistant (lecture locale de
-        # quelques millisecondes) : il n'apparaît que là où une attente est
-        # réelle — premier chargement ou ingestion forcée.
-        with st.spinner(
-            "Initialisation du calendrier..." if first_load
-            else "Ingestion forcée en cours..."
-        ):
-            artifact_available = ensure_artifacts(force=force)
-    else:
-        artifact_available = ensure_artifacts(force=force)
+    # v2.5.2 (audit OPUS A1) — on DÉCLENCHE puis on rend, dans cet ordre,
+    # sans jamais attendre. L'ancien code appelait run_once() ici, derrière
+    # un st.spinner : un fetch de 90 s valait 90 s d'écran blanc — et sur
+    # Streamlit Cloud le navigateur ou le health check peut renoncer avant.
+    kick_ingestion(force=force)
 
     payload = load_payload()
     health = load_health()
     state = load_state()
+    is_seed = False
 
-    if not artifact_available or payload is None:
-        st.markdown("## 🔷 BLUESTAR Economic Calendar")
-        st.error(
-            "🚨 Aucun artefact canonique valide n’est disponible."
-        )
-
-        runtime = runtime_control()
-
-        st.markdown("### Diagnostic")
-        st.json({
-            "data_dir": str(DATA_DIR),
-            "canonical_path": str(CANONICAL_PATH),
-            "canonical_exists": CANONICAL_PATH.exists(),
-            # [OPUS-A] les trois lignes qui manquaient pour trancher :
-            "ingestion_enabled": INGEST_ENABLED,
-            "canonical_schema_version": (
-                (read_json(CANONICAL_PATH) or {}).get("schema_version")
-                if CANONICAL_PATH.exists() else None
-            ),
-            "app_schema_version": SCHEMA_VERSION,
-            "canonical_parse_error": _LAST_LOAD_ERROR["msg"],
-            "health_exists": HEALTH_PATH.exists(),
-            "state_exists": STATE_PATH.exists(),
-            "last_runtime_error": runtime.last_runtime_error,
-            "last_ingestion_result_ok": runtime.last_result_ok,
-        })
-
-        if health:
-            st.markdown("### Health")
-            st.json(health)
-
-        if state:
-            st.markdown("### Circuit breaker")
-            st.json(state)
-
-        # [OPUS-A] En mode lecteur, AUCUN appel réseau n'est tenté : conseiller
-        # de « vérifier le réseau » envoyait l'exploitant sur une fausse piste
-        # pendant que la vraie cause (data/ vide + aucun producteur) restait
-        # invisible. Sur Streamlit Community Cloud le filesystem est éphémère
-        # et aucun cron externe ne peut écrire dans ce conteneur : le mode
-        # lecteur y est structurellement une impasse.
-        if not INGEST_ENABLED:
-            st.warning(
-                "Mode LECTEUR actif (BLUESTAR_DISABLE_INGEST) : cette instance "
-                "n'émet aucun appel réseau et attend qu'un producteur externe "
-                "écrive dans " + str(DATA_DIR) + ". Sur Streamlit Community "
-                "Cloud, ce producteur n'existe pas et le disque est éphémère — "
-                "retirez BLUESTAR_DISABLE_INGEST pour que l'application "
-                "alimente elle-même son calendrier."
-            )
+    if payload is None:
+        # v2.5.2 (audit OPUS R7) — dernier recours d'AFFICHAGE : la semence
+        # versionnée dans le dépôt. Lecture seule, banderole déployée, export
+        # coupé.
+        seed_payload, seed_path = load_seed()
+        if seed_payload is not None:
+            payload, is_seed = seed_payload, True
+            LOG.info("affichage de la semence %s en attente d'un artefact "
+                     "réel", seed_path)
         else:
-            st.warning(
-                "Vérifiez l’accès réseau sortant vers la source, "
-                "les logs Streamlit et la variable BLUESTAR_DATA_DIR."
-            )
-        return
+            render_bootstrap_panel(health, state, reference)
+            return
 
     reference = now_utc()
+    events = prepare_view_events(payload=payload, filters=filters, reference=reference)
 
-    events = prepare_view_events(
-        payload=payload,
-        filters=filters,
-        reference=reference,
-    )
-
-    render_command_bar(
-        payload=payload,
-        reference=reference,
-        visible_count=len(events),
-    )
-
-    render_header(
-        payload=payload,
-        health=health,
-        state=state,
-        reference=reference,
-    )
+    render_command_bar(payload=payload, reference=reference,
+                       visible_count=len(events), is_seed=is_seed)
+    render_header(payload=payload, health=health, state=state,
+                  reference=reference, is_seed=is_seed)
 
     tab_desk, tab_detail, tab_assets, tab_quality, tab_exports = st.tabs(
-        [
-            "🎯 Trading Desk",
-            "📋 Détaillée",
-            "🥇 Assets",
-            "🔍 Qualité",
-            "📦 Exports",
-        ]
+        ["🎯 Trading Desk", "📋 Détaillée", "🥇 Assets",
+         "🔍 Qualité", "📦 Exports"]
     )
 
     with tab_desk:
         render_trading_desk(events, filters)
-
     with tab_detail:
         render_detailed_view(events, filters)
-
     with tab_assets:
         render_assets_view(events, filters)
-
     with tab_quality:
-        render_quality_view(
-            payload,
-            health,
-            state,
-            reference,
-        )
-
+        render_quality_view(payload, health, state, reference)
     with tab_exports:
-        render_exports(
-            payload,
-            health,
-            reference,
-        )
+        render_exports(payload, health, reference, is_seed=is_seed)
 
     st.divider()
-
-    source_age = max(
-        0,
-        int(
-            (
-                reference - payload.source.fetched_at_utc.astimezone(UTC)
-            ).total_seconds()
-        ),
-    )
-
+    source_age = max(0, int((reference - payload.source.fetched_at_utc
+                             .astimezone(UTC)).total_seconds()))
+    control = runtime_control()
     st.caption(
-        f"Vue calculée : {iso_z(reference)} · "
-        f"Source age : {source_age}s · "
+        f"Vue calculée : {iso_z(reference)} · Source age : {source_age}s · "
         f"Événements visibles : {len(events)}/{len(payload.events)} · "
-        f"Auto-refresh UI : "
-        f"{'actif' if filters.auto_refresh else 'désactivé'}"
+        f"Auto-refresh UI : {'actif' if filters.auto_refresh else 'désactivé'} · "
+        f"Ingestion de fond : {'en cours' if control.worker_alive() else 'au repos'}"
+        + (" · SOURCE : SEMENCE FIGÉE" if is_seed else "")
     )
 
 
-# Deux fragments distincts : run_every est fixé À LA DÉCORATION, pas à
-# l'exécution — la case « Rafraîchissement visuel » ne pouvait donc rien
-# changer dans la version précédente (les deux branches de main() appelaient
-# le même fragment périodique : contrôle décoratif, audité faux). Le dispatch
-# sur filters.auto_refresh est désormais RÉEL (audit OPUS).
+# v2.5.2 (audit OPUS A1) — trois fragments distincts : run_every est fixé
+# À LA DÉCORATION, pas à l'exécution — la case « Rafraîchissement visuel »
+# ne pouvait donc rien changer dans une version antérieure où les deux
+# branches appelaient le même fragment périodique (contrôle décoratif,
+# audité faux). Le fragment rapide sert l'amorçage : il faut voir l'artefact
+# atterrir en quelques secondes, pas en dix.
 @st.fragment(run_every=UI_REFRESH_SECONDS)
 def _live_fragment(filters: ViewFilters) -> None:
+    _render_application_body(filters)
+
+
+@st.fragment(run_every=BOOTSTRAP_REFRESH_SECONDS)
+def _bootstrap_fragment(filters: ViewFilters) -> None:
     _render_application_body(filters)
 
 
@@ -1854,11 +1971,16 @@ def _manual_fragment(filters: ViewFilters) -> None:
 
 
 def render_live_application(filters: ViewFilters) -> None:
-    """Point d'entrée unique : le rerun périodique suit la case UI."""
-    if filters.auto_refresh:
+    """Point d'entrée unique : le rerun périodique suit la case UI, et
+    l'amorçage prend un pas plus rapide — lire un fichier local coûte ~1 ms,
+    le coût du tick rapide est donc négligeable, et il ne dure que le temps
+    de l'amorçage."""
+    if not filters.auto_refresh:
+        _manual_fragment(filters)
+    elif CANONICAL_PATH.exists():
         _live_fragment(filters)
     else:
-        _manual_fragment(filters)
+        _bootstrap_fragment(filters)
 
 
 # =============================================================================
