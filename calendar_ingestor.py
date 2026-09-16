@@ -31,7 +31,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple  # [OPUS-F] List: annotation
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -102,16 +102,10 @@ def _anchor_data_dir(value: str) -> Path:
     cron (cwd=/) et Streamlit (cwd=app) produisaient silencieusement DEUX jeux
     d'artefacts parallèles. Un chemin par défaut relatif s'ancre désormais sur
     le dossier d'installation ; un `--data-dir` explicite reste relatif au cwd
-    (choix humain, intentionnel).
-
-    Alias public ``anchor_data_dir`` : app.py important ce symbole privé, le
-    couplage se brisait au moindre renommage interne (audit OPUS 16-09-2026)."""
+    (choix humain, intentionnel)."""
     p = Path(value)
     return p if p.is_absolute() else Path(__file__).resolve().parent / p
 
-
-# Alias public — les modules externes (app.py) doivent utiliser celui-ci.
-anchor_data_dir = _anchor_data_dir
 
 DATA_DIR = _anchor_data_dir(os.getenv("BLUESTAR_DATA_DIR", "data"))
 RAW_KEEP = int(os.getenv("BLUESTAR_RAW_KEEP", "200"))   # H1 : rotation raw/
@@ -630,9 +624,6 @@ def write_health(data_dir: Path, state: IngestorState, now: datetime,
         "event_count": len(payload.events) if payload else 0,
         "data_quality_score": payload.quality.data_quality_score if payload else 0.0,
         "warnings": list(payload.quality.warnings) if payload else [],
-        # [audit OPUS branche B] rendre l'entonnoir visible à l'ops :
-        # « 0 événement » devient « N écartés par impact/window/… ».
-        "selection_dropped": dict(payload.quality.selection_dropped) if payload else {},
         "last_error": error or state.last_error,
         # [audit OPUS] le health.json devient auto-suffisant pour le diagnostic
         # croisé cron-vs-app : où sont les artefacts, ce que la source a dit,
