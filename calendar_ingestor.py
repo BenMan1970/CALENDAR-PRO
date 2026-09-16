@@ -92,19 +92,48 @@ FF_PAGE_UA = os.getenv(
 ACTUALS_REFRESH_S = int(os.getenv("BLUESTAR_ACTUALS_REFRESH", "900"))
 ACTUALS_FETCH_DEADLINE_S = float(os.getenv("BLUESTAR_ACTUALS_DEADLINE_S", "45"))
 ACTUALS_OVERVIEW_NAME = "actuals_overlay.json"
-# 'off' désactive totalement la collecte (pas de requête vers le site).
-DISABLE_ACTUALS = (os.getenv("BLUESTAR_DISABLE_ACTUALS", "") or "").strip().lower() in {
+# v2.5.2 (audit OPUS R6) : la collecte actuals est désormais OPT-IN.
+# forexfactory.com/calendar renvoie 403 + challenge Cloudflare « managé »
+# depuis une IP datacenter (mesuré le 16/09/2026). Sept GET pour sept refus,
+# exécutés dans le verrou de publication, retardait le seul travail qui
+# compte. BLUESTAR_ENABLE_ACTUALS=1 réactive (utile depuis IP résidentielle).
+ENABLE_ACTUALS = (os.getenv("BLUESTAR_ENABLE_ACTUALS", "") or "").strip().lower() in {
     "1", "true", "yes", "on"}
+# v2.5.2 (audit OPUS R6) : une fois le challenge Cloudflare observé, on ne
+# réessaie plus pendant ce plafond (1 h par défaut) — insister amplifierait
+# le signalement anti-bot. Persisté via _state.json.actuals_blocked_until.
+ACTUALS_BLOCKED_S = int(os.getenv("BLUESTAR_ACTUALS_BLOCKED_S", "3600"))
+# v2.5.2 (audit OPUS R3) : espacement minimal entre fetchs distants. L'egress
+# de Streamlit Community Cloud est partagé sur 18 adresses GCP documentées :
+# votre quota n'est pas le vôtre. Plafond dur — deux fetchs distants de moins
+# que cette valeur dorment. 0 = désactivé.
+MIN_FETCH_SPACING_S = max(0, int(os.getenv("BLUESTAR_MIN_FETCH_SPACING", "0")))
+# v2.5.2 (audit OPUS R2) : bornes du cooldown de quota. Un Retry-After observé
+# est honoré, mais borné — un serveur demandant 6 h ne doit pas geler le
+# producteur pour la journée.
+RATE_LIMIT_MIN_S = 60
+RATE_LIMIT_MAX_S = 3600
+RATE_LIMIT_FALLBACK_S = 300  # Retry-After absent ou illisible
 
 
-def _anchor_data_dir(value: str) -> Path:
+def anchor_data_dir(value: str) -> Path:
     """H2 (audit 2026-09-11) : « data » relatif était résolu contre le CWD —
     cron (cwd=/) et Streamlit (cwd=app) produisaient silencieusement DEUX jeux
     d'artefacts parallèles. Un chemin par défaut relatif s'ancre désormais sur
     le dossier d'installation ; un `--data-dir` explicite reste relatif au cwd
-    (choix humain, intentionnel)."""
+    (choix humain, intentionnel).
+
+    v2.5.2 (audit OPUS A7) : la fonction perd son underscore privé — app.py
+    l'importait, couplage par détail d'implémentation. Le nom public est
+    désormais le contrat."""
     p = Path(value)
     return p if p.is_absolute() else Path(__file__).resolve().parent / p
+
+
+# v2.5.2 (audit OPUS A7) : alias privé pour rétro-compatibilité. Le nom
+# public `anchor_data_dir` est le contrat ; l'alias évite de casser un éventuel
+# import tiers existant.
+_anchor_data_dir = anchor_data_dir
 
 
 DATA_DIR = _anchor_data_dir(os.getenv("BLUESTAR_DATA_DIR", "data"))
@@ -269,6 +298,15 @@ class IngestorState:
         self.last_error: Optional[str] = raw.get("last_error")
         self.etag: Optional[str] = raw.get("etag")
         self.last_modified: Optional[str] = raw.get("last_modified")
+        # v2.5.2 (audit OPUS R2) : cooldown de quota persistant. Un reboot ne
+        # doit pas faire repartir le producteur marteler la source après un 429.
+        self.rate_limited_until: Optional[str] = raw.get("rate_limited_until")
+        self.rate_limit_hits: int = int(raw.get("rate_limit_hits", 0))
+        # v2.5.2 (audit OPUS R3) : espacement minimal entre fetchs distants.
+        # last_fetch_attempt_utc sert de mémoire pour ce plafond.
+        self.last_fetch_attempt_utc: Optional[str] = raw.get("last_fetch_attempt_utc")
+        # v2.5.2 (audit OPUS R6) : challenge Cloudflare managé observé.
+        self.actuals_blocked_until: Optional[str] = raw.get("actuals_blocked_until")
 
     def save(self) -> None:
         atomic_write_json(self.path, {
@@ -281,9 +319,19 @@ class IngestorState:
             "last_error": self.last_error,
             "etag": self.etag,
             "last_modified": self.last_modified,
+            # v2.5.2 : la mémoire de quota traverse les redémarrages.
+            "rate_limited_until": self.rate_limited_until,
+            "rate_limit_hits": self.rate_limit_hits,
+            "last_fetch_attempt_utc": self.last_fetch_attempt_utc,
+            "actuals_blocked_until": self.actuals_blocked_until,
         })
 
     def allow_request(self, now: datetime) -> bool:
+        # v2.5.2 (audit OPUS R2) : le cooldown de quota court AVANT le
+        # breaker — un 429 n'ouvre jamais le breaker, mais il gèle le cycle
+        # pour la durée observée (bornée par RATE_LIMIT_MAX_S).
+        if self.rate_limit_remaining(now) > 0:
+            return False
         if self.circuit_state != "OPEN":
             return True
         if not self.opened_at:
@@ -304,6 +352,12 @@ class IngestorState:
         self.last_successful_fetch_utc = iso_z(now)
 
     def record_failure(self, now: datetime, error: str) -> None:
+        # v2.5.2 (audit OPUS R2) : un quota ne doit JAMAIS ouvrir le breaker.
+        # Si l'appelant a levé RateLimited, il doit passer par
+        # record_rate_limit à la place — pas ici. Ce garde défensif empêche
+        # un bug futur de contournement silencieux.
+        if error.startswith("RATE_LIMITED"):
+            return
         self.consecutive_failures += 1
         self.last_error = error
         if self.consecutive_failures >= CB_FAILURE_THRESHOLD:
@@ -312,12 +366,70 @@ class IngestorState:
             self.circuit_state = "OPEN"
             self.opened_at = iso_z(now)
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # v2.5.2 (audit OPUS R2) — cooldown de quota borné des deux côtés.
+    # ─────────────────────────────────────────────────────────────────────────
+    def record_rate_limit(self, now: datetime,
+                          retry_after_s: Optional[float]) -> float:
+        """Retourne le cooldown effectivement appliqué (borné)."""
+        if retry_after_s is None or retry_after_s < 0:
+            applied = RATE_LIMIT_FALLBACK_S
+        else:
+            applied = max(RATE_LIMIT_MIN_S, min(RATE_LIMIT_MAX_S, int(retry_after_s)))
+        self.rate_limited_until = iso_z(now + timedelta(seconds=applied))
+        self.rate_limit_hits += 1
+        self.last_error = f"RATE_LIMITED:Retry-After={retry_after_s}s→cooldown={applied}s"
+        return applied
+
+    def rate_limit_remaining(self, now: datetime) -> int:
+        if not self.rate_limited_until:
+            return 0
+        until = datetime.fromisoformat(self.rate_limited_until.replace("Z", "+00:00"))
+        rem = int((until - now).total_seconds())
+        return max(0, rem)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # v2.5.2 (audit OPUS R3) — espacement minimal entre fetchs.
+    # ─────────────────────────────────────────────────────────────────────────
+    def note_fetch_attempt(self, now: datetime) -> None:
+        self.last_fetch_attempt_utc = iso_z(now)
+
+    def fetch_spacing_remaining(self, now: datetime) -> int:
+        if MIN_FETCH_SPACING_S <= 0 or not self.last_fetch_attempt_utc:
+            return 0
+        last = datetime.fromisoformat(self.last_fetch_attempt_utc.replace("Z", "+00:00"))
+        elapsed = (now - last).total_seconds()
+        # v2.5.2 (audit OPUS R3) : une horloge qui recule (VM restaurée, NTP
+        # brutal) produit un « last » dans le futur. Traité comme maintenant,
+        # jamais comme un gel indéfini.
+        if elapsed < 0:
+            return 0
+        return max(0, MIN_FETCH_SPACING_S - int(elapsed))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # v2.5.2 (audit OPUS R6) — challenge anti-bot.
+    # ─────────────────────────────────────────────────────────────────────────
+    def actuals_blocked_remaining(self, now: datetime) -> int:
+        if not self.actuals_blocked_until:
+            return 0
+        until = datetime.fromisoformat(self.actuals_blocked_until.replace("Z", "+00:00"))
+        rem = int((until - now).total_seconds())
+        return max(0, rem)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FETCH RÉSILIENT
 # ─────────────────────────────────────────────────────────────────────────────
 def build_session() -> requests.Session:
     session = requests.Session()
+    # v2.5.2 (audit OPUS R1) — 429 RETIRE du status_forcelist et
+    # respect_retry_after_header=False. Cause racine de la panne : urllib3
+    # Retry.sleep() honore Retry-After sans que backoff_max ne plafonne cette
+    # durée. Avec total=4 et Retry-After: 247 (mesuré sur FF depuis une IP
+    # datacenter), le worker dormait ~988 s — soit ~17 minutes de zombie
+    # tenant une requests.Session non thread-safe. On ne délègue PAS le 429 à
+    # urllib3 ; on le traite nous-mêmes via RateLimited (R1) + cooldown borné
+    # (R2).
     retry = Retry(
         total=4,
         connect=3,
@@ -325,10 +437,10 @@ def build_session() -> requests.Session:
         status=3,
         backoff_factor=1.5,
         backoff_jitter=0.4,
-        status_forcelist=(408, 429, 500, 502, 503, 504),
+        status_forcelist=(408, 500, 502, 503, 504),  # 429 retire
         allowed_methods=frozenset(["GET"]),
         raise_on_status=False,
-        respect_retry_after_header=True,
+        respect_retry_after_header=False,  # R1 — ne pas dormir Retry-After
     )
     adapter = HTTPAdapter(max_retries=retry, pool_maxsize=4)
     session.mount("https://", adapter)
@@ -347,9 +459,84 @@ class FetchError(RuntimeError):
         self.code = code
 
 
+# v2.5.2 (audit OPUS R1) — un quota n'est pas une panne. Exception dédiée,
+# remontée à run_once qui déclenche le cooldown borné (R2) SANS toucher au
+# breaker.
+class RateLimited(FetchError):
+    """Le serveur a répondu 429 (ou 503 avec Retry-After). Le cooldown est
+    honour mais borné par RATE_LIMIT_MAX_S. La Session est fermée avant levée
+    pour ne pas garder une connexion sur un hôte qui vient de nous demander
+    de ralentir."""
+
+    def __init__(self, retry_after_s: Optional[float], message: str = ""):
+        super().__init__("RATE_LIMITED",
+                         message or f"Retry-After={retry_after_s}s")
+        self.retry_after = retry_after_s
+
+
+# v2.5.2 (audit OPUS R1) — parse Retry-After selon RFC 9110. Accepte
+# delta-seconds (« 120 ») OU HTTP-date (« Wed, 16 Sep 2026 12:05:00 GMT »).
+def parse_retry_after(value: Optional[str],
+                      now: datetime) -> Optional[float]:
+    if not value:
+        return None
+    v = value.strip()
+    if not v:
+        return None
+    # delta-seconds
+    try:
+        return float(v)
+    except ValueError:
+        pass
+    # HTTP-date — formats RFC 7231 / 9110
+    for fmt in (
+        "%a, %d %b %Y %H:%M:%S GMT",
+        "%A, %d-%b-%y %H:%M:%S GMT",
+        "%a %b %d %H:%M:%S %Y",
+    ):
+        try:
+            then = datetime.strptime(v, fmt).replace(tzinfo=UTC)
+            return max(0.0, (then - now).total_seconds())
+        except ValueError:
+            continue
+    return None
+
+
+# v2.5.2 (audit OPUS R6) — détection du challenge Cloudflare « managé ».
+# Retourne True si la page ressemble au challenge — un body avec timeLabel
+# seul ne suffit pas, il faut le marqueur _cf_chl_opt ou le titre « Just a
+# moment ». Sans cela, on publierait un overlay trompeur.
+_BOT_CHALLENGE_MARKERS = (
+    "just a moment", "_cf_chl_opt", "cf-browser-verification",
+    "cf_chl_managed", "managed challenge",
+)
+
+
+def looks_like_bot_challenge(html: str) -> bool:
+    if not html:
+        return False
+    head = html[:4096].lower()
+    return any(m in head for m in _BOT_CHALLENGE_MARKERS)
+
+
+# v2.5.2 (audit OPUS R4) — registre des fetchs en vol, par URL. Empêche
+# l'accumulation de zombies : un second appel pour la même URL pendant que
+# le premier worker dort dans Retry.sleep() lève FETCH_BUSY, AUCUNE
+# requête réseau ajoutée.
+_INFLIGHT: Dict[str, threading.Thread] = {}
+_INFLIGHT_LOCK = threading.Lock()
+
+
 def fetch_source(session: requests.Session, url: str,
-                 deadline_s: float = None) -> Tuple[Any, Dict[str, Any]]:
+                 deadline_s: float = None,
+                 headers: Optional[Dict[str, str]] = None) -> Tuple[Any, Dict[str, Any]]:
     """H7 : plafond DUR au temps mural total, par worker daemon + join.
+
+    v2.5.2 (audit OPUS R4) : garde FETCH_BUSY. Un fetch précédent peut
+    survivre au-delà du deadline (worker daemon encore vivant dans
+    urllib3.Retry.sleep()). Sans ce garde, le cycle suivant ajoutait un
+    NOUVEAU worker pour la même URL — amplification du quota, accumulation
+    de zombies. Maintenant : 1 URL = au plus 1 worker en vol.
 
     Les timeouts par opération (connect 5 s / read 15 s) ne bornent pas le
     total : une connexion qui dégouline (36 octets/s mesurés en réel sur ce
@@ -363,15 +550,28 @@ def fetch_source(session: requests.Session, url: str,
     """
     if deadline_s is None:
         deadline_s = FETCH_DEADLINE_S
+    with _INFLIGHT_LOCK:
+        existing = _INFLIGHT.get(url)
+        if existing is not None and existing.is_alive():
+            raise FetchError("FETCH_BUSY",
+                             f"un fetch est déjà en vol pour {url}")
     outcome: Dict[str, Any] = {}
 
     def _worker() -> None:
         try:
-            outcome["value"] = _fetch_source_blocking(session, url, deadline_s)
+            outcome["value"] = _fetch_source_blocking(session, url, deadline_s, headers)
         except BaseException as exc:                          # noqa: BLE001
             outcome["error"] = exc
+        finally:
+            with _INFLIGHT_LOCK:
+                # Ne retirer QUE notre propre thread — un autre pourrait
+                # avoir démarré entre-temps.
+                if _INFLIGHT.get(url) is th:
+                    _INFLIGHT.pop(url, None)
 
     th = threading.Thread(target=_worker, daemon=True, name="bluestar-fetch")
+    with _INFLIGHT_LOCK:
+        _INFLIGHT[url] = th
     started = time.monotonic()
     th.start()
     th.join(max(1.0, deadline_s))
@@ -385,10 +585,12 @@ def fetch_source(session: requests.Session, url: str,
 
 
 def _fetch_source_blocking(session: requests.Session, url: str,
-                           deadline_s: float) -> Tuple[Any, Dict[str, Any]]:
+                           deadline_s: float,
+                           headers: Optional[Dict[str, str]] = None) -> Tuple[Any, Dict[str, Any]]:
     started = time.monotonic()
     try:
-        response = session.get(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), stream=True)
+        response = session.get(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), stream=True,
+                                headers=headers)
     except requests.Timeout as exc:
         raise FetchError("NETWORK_TIMEOUT", str(exc)) from exc
     except requests.RequestException as exc:
@@ -396,6 +598,35 @@ def _fetch_source_blocking(session: requests.Session, url: str,
 
     with response:
         status = response.status_code
+        # v2.5.2 (audit OPUS R1) — 429 / 503 avec Retry-After : on ferme la
+        # session et on lève RateLimited. urllib3 a été désactivé pour ces
+        # statuts (cf. build_session) ; c'est notre responsabilité de traiter.
+        # La session est fermée parce que l'hôte vient de nous demander de
+        # ralentir — garder la connexion vivante serait impoli.
+        if status == 429 or (status == 503 and response.headers.get("Retry-After")):
+            ra = parse_retry_after(response.headers.get("Retry-After"),
+                                   datetime.now(UTC))
+            try:
+                response.close()
+            except Exception:                               # noqa: BLE001
+                pass
+            raise RateLimited(ra, f"status={status} Retry-After={ra}s")
+        # v2.5.2 (audit OPUS R5) — 304 Not Modified : le serveur certifie la
+        # fraîcheur de notre cache. On retourne un body vide + meta 304, le
+        # caller (run_once) rejoue le corps depuis le LKG.
+        if status == 304:
+            content_type = (response.headers.get("Content-Type") or "").split(";")[0].strip()
+            meta = {
+                "http_status": 304,
+                "content_type": content_type or None,
+                "payload_bytes": 0,
+                "payload_sha256": "sha256:not-modified",
+                "etag": response.headers.get("ETag"),
+                "last_modified": response.headers.get("Last-Modified"),
+                "fetch_duration_ms": int((time.monotonic() - started) * 1000),
+                "raw_bytes": b"",
+            }
+            return [], meta
         if status >= 400:
             raise FetchError("HTTP_ERROR", f"status={status}")
 
@@ -514,17 +745,29 @@ def _actuals_summary_from_file(path: Path) -> Dict[str, Any]:
 
 
 def refresh_actuals_overlay(data_dir: Path, session: requests.Session,
-                            now: datetime) -> Dict[str, Any]:
+                            now: datetime,
+                            state: Optional["IngestorState"] = None) -> Dict[str, Any]:
     """Collecte les actuals embarqués dans les pages publiques du site FF pour
     les jours écoulés de la semaine (lundi → aujourd'hui, 7 max) et écrit
     `data/actuals_overlay.json` (atomique). JAMAIS bloquant : tout échec
     network/structure conserve le fichier précédent et ne touche pas au cycle
     principal. Un fichier PARTIELlement reconstruit n'est jamais publié comme
-    si tout était à jour : pages_failed est tracé dans l'artefact."""
+    si tout était à jour : pages_failed est tracé dans l'artefact.
+
+    v2.5.2 (audit OPUS R6) : la collecte est OPT-IN (BLUESTAR_ENABLE_ACTUALS=1).
+    Par défaut, AUCUNE requête n'est émise vers forexfactory.com. Une fois le
+    challenge Cloudflare managé observé (403 + body typique), `state` est
+    configuré pour bloquer toute nouvelle tentative pendant ACTUALS_BLOCKED_S.
+    """
     overlay_path = data_dir / ACTUALS_OVERVIEW_NAME
-    if DISABLE_ACTUALS:
+    if not ENABLE_ACTUALS:
         summary = _actuals_summary_from_file(overlay_path)
         summary["disabled"] = True
+        return summary
+    # v2.5.2 (audit OPUS R6) : challenge observé — on ne réessaie plus.
+    if state is not None and state.actuals_blocked_remaining(now) > 0:
+        summary = _actuals_summary_from_file(overlay_path)
+        summary["blocked_until"] = state.actuals_blocked_until
         return summary
     try:
         age = now.timestamp() - overlay_path.stat().st_mtime
@@ -534,8 +777,6 @@ def refresh_actuals_overlay(data_dir: Path, session: requests.Session,
     # (sinon un âge mesuré négatif — horloge Windows grossière — satisferait
     # « age < 0 » et gèlerait la collecte indéfiniment).
     if ACTUALS_REFRESH_S > 0 and age is not None and age < ACTUALS_REFRESH_S:
-        # age < 0 = mtime « dans le futur » : un fichier qui vient de naître
-        # est, par définition, frais.
         summary = _actuals_summary_from_file(overlay_path)
         summary["skipped_fresh"] = True
         return summary
@@ -545,17 +786,45 @@ def refresh_actuals_overlay(data_dir: Path, session: requests.Session,
     collected: Dict[Any, Dict[str, Any]] = {}
     pages_ok: List[str] = []
     pages_failed: List[str] = []
+    challenged = False
     for day in days:
         url = ff_day_url(day)
+        # v2.5.2 (audit OPUS R6) — pré-fetch pour détection challenge même
+        # si fetch_ff_page lève FetchError(HTTP_ERROR) sur un 403. On lit
+        # le body directement via une fonction bas-niveau ; le cost est
+        # négligeable (un seul GET par jour, de toute façon nécessaire).
+        html: str = ""
         try:
             html = fetch_ff_page(session, url)
         except FetchError as exc:
+            # v2.5.2 (audit OPUS R6) : 403 = probablement challenge CF.
+            # On ne peut pas affirmer sans le body ; mais un 403 serveur
+            # est rare pour FF sans challenge — on suppose challenge et
+            # on bloque pour la durée du cooldown, sans insister sur les
+            # jours suivants (7 GET pour 7 refus = signal anti-bot).
+            if getattr(exc, "code", "") == "HTTP_ERROR" and "status=403" in str(exc):
+                challenged = True
+                if state is not None:
+                    state.actuals_blocked_until = iso_z(
+                        now + timedelta(seconds=ACTUALS_BLOCKED_S))
+                pages_failed.append(f"{day.isoformat()}:CHALLENGE_CF_403")
+                LOG.error("challenge anti-bot CF présumé (403) (%s) — blocage %ds",
+                          day, ACTUALS_BLOCKED_S)
+                break
             pages_failed.append(f"{day.isoformat()}:{getattr(exc, 'code', 'ERR')}")
             continue
+        # v2.5.2 (audit OPUS R6) : détection retardée — le 200 peut masquer
+        # un challenge. Le body suffit pour le dire.
+        if looks_like_bot_challenge(html):
+            challenged = True
+            if state is not None:
+                state.actuals_blocked_until = iso_z(
+                    now + timedelta(seconds=ACTUALS_BLOCKED_S))
+            pages_failed.append(f"{day.isoformat()}:CHALLENGE_CF")
+            LOG.error("challenge anti-bot CF détecté dans le body (%s)", day)
+            break
         events = parse_ff_embedded_calendar(html)
         if not events and '"timeLabel"' in html:
-            # page présente mais structure méconnue : on ne publie RIEN de
-            # trompeur, l'ancien overlay reste la vérité du dernier état lu.
             pages_failed.append(f"{day.isoformat()}:STRUCTURE_CHANGED")
             LOG.error("structure page FF inconnue (%s) — overlay non modifié", day)
             continue
@@ -567,7 +836,12 @@ def refresh_actuals_overlay(data_dir: Path, session: requests.Session,
         "exists": overlay_path.exists(),
         "pages_ok": pages_ok,
         "pages_failed": pages_failed,
+        "challenged": challenged,
     }
+    if challenged:
+        summary["kept_previous"] = True
+        summary.update(_actuals_summary_from_file(overlay_path))
+        return summary
     if not pages_ok:
         summary["kept_previous"] = True
         summary.update(_actuals_summary_from_file(overlay_path))
@@ -608,7 +882,7 @@ def write_health(data_dir: Path, state: IngestorState, now: datetime,
         status = payload.quality.status.value
 
     atomic_write_json(data_dir / "health.json", {
-        "schema_version": "health-1.2.0",
+        "schema_version": "health-1.3.0",  # v2.5.2 : +rate_limit, +actuals_blocked
         "core_schema_version": SCHEMA_VERSION,
         "status": status,
         "checked_at_utc": iso_z(now),
@@ -637,6 +911,19 @@ def write_health(data_dir: Path, state: IngestorState, now: datetime,
         "tz": tz_environment(),
         # v2.5.0 : état de l'overlay actuals (vue seule ; jamais bloquant).
         "actuals_overlay": actuals_info,
+        # v2.5.2 (audit OPUS R2/R3/R6) : mémoire de quota et de challenge.
+        "rate_limit": {
+            "rate_limited_until": state.rate_limited_until,
+            "rate_limit_remaining_s": state.rate_limit_remaining(now),
+            "rate_limit_hits": state.rate_limit_hits,
+        },
+        "fetch_spacing": {
+            "min_spacing_s": MIN_FETCH_SPACING_S,
+            "remaining_s": state.fetch_spacing_remaining(now),
+            "last_fetch_attempt_utc": state.last_fetch_attempt_utc,
+        },
+        "actuals_blocked_until": state.actuals_blocked_until,
+        "actuals_blocked_remaining_s": state.actuals_blocked_remaining(now),
     })
 
 
@@ -644,14 +931,32 @@ def run_once(data_dir: Path, policy: SelectionPolicy, session: requests.Session,
              keep_history: int = 200) -> Optional[CalendarPayload]:
     """Cycle unique sous verrou inter-processus (H3). Si l'autre producteur
     (cron ou Streamlit) tient déjà le verrou, le cycle est Sauté sans effet
-    de bord — pas d'échec compté, pas d'écriture : le prochain tick reprendra."""
+    de bord — pas d'échec compté, pas d'écriture : le prochain tick reprendra.
+
+    v2.5.2 (audit OPUS R6) — l'overlay actuals tourne HORS du verrou de
+    publication. Le contrat canonique est sur disque AVANT que l'overlay
+    ne parte ; 7 GET vers forexfactory.com ne doivent pas retarder le seul
+    travail qui compte.
+    """
     if not _acquire_publish_lock(data_dir):
         LOG.warning("un autre producteur détient le verrou d'édition — cycle sauté")
         return None
     try:
-        return _run_once_impl(data_dir, policy, session, keep_history)
+        result = _run_once_impl(data_dir, policy, session, keep_history)
     finally:
         _release_publish_lock(data_dir)
+    # v2.5.2 (audit OPUS R6) — overlay HORS verrou. Si _run_once_impl a
+    # retourné (payload, state), on complète par l'overlay + health final.
+    if result is None:
+        return None
+    payload, state, now = result
+    try:
+        actuals_info = refresh_actuals_overlay(data_dir, session, now, state)
+    except Exception as exc:                               # noqa: BLE001
+        LOG.exception("overlay actuals — échec inattendu, cycle principal intact")
+        actuals_info = {"error": f"UNEXPECTED: {type(exc).__name__}"}
+    write_health(data_dir, state, now, payload, state.last_error, actuals_info)
+    return payload
 
 
 def _run_once_impl(data_dir: Path, policy: SelectionPolicy, session: requests.Session,
@@ -670,21 +975,59 @@ def _run_once_impl(data_dir: Path, policy: SelectionPolicy, session: requests.Se
         error = "CIRCUIT_OPEN"
         feed_status["thisweek"] = "circuit_open"
         LOG.warning("circuit breaker OPEN - skipping remote fetch")
+    elif state.rate_limit_remaining(now) > 0:
+        # v2.5.2 (audit OPUS R2) : quota actif. On ne tente PAS le fetch.
+        error = f"RATE_LIMITED:cooldown={state.rate_limit_remaining(now)}s"
+        feed_status["thisweek"] = "rate_limited"
+        LOG.info("quota cooldown actif (%ds) — fetch différé",
+                 state.rate_limit_remaining(now))
+    elif state.fetch_spacing_remaining(now) > 0:
+        # v2.5.2 (audit OPUS R3) : espacement minimal non atteint.
+        # On dort le complément, pas plus — le cycle reste à l'heure.
+        wait = state.fetch_spacing_remaining(now)
+        LOG.info("espacement minimal : %ds restant", wait)
+        time.sleep(wait)
+        now = datetime.now(UTC)
+        state.note_fetch_attempt(now)
     else:
+        state.note_fetch_attempt(now)
+        # v2.5.2 (audit OPUS R5) — conditional GET. On n'envoie If-None-Match
+        # QUE si un LKG existe (sinon un 304 nous laisserait un corps vide).
+        lkg_for_cond = None
+        if state.etag:
+            cached = read_json(lkg_path)
+            if cached and isinstance(cached.get("payload"), list):
+                lkg_for_cond = cached
+        cond_headers = {"If-None-Match": state.etag} if lkg_for_cond else {}
         try:
-            raw_list, meta = fetch_source(session, SOURCE_URL)
-            feed_status["thisweek"] = "ok"
-            state.record_success(now)
-            # [audit OPUS] ETag/Last-Modified sont PERSISTÉS À TITRE
-            # D'OBSERVATION seulement. Un conditional GET n'est PAS branché :
-            # envoyer If-None-Match sans gérer le 304 transformerait un
-            # « inchangé » en INVALID_JSON (corps vide), et le gérer
-            # correctement exige rejouer le corps depuis un cache — faux
-            # sentiment de fraîcheur sur fetched_at. Ne pas activer sans un
-            # chemin complet 304 → re-publication horodatée. (Dormant, donc
-            # inerte — l'app ne demande jamais qu'on lui envoie un 304.)
-            state.etag = meta.get("etag")
-            state.last_modified = meta.get("last_modified")
+            raw_list, meta = fetch_source(session, SOURCE_URL,
+                                             headers=cond_headers or None)
+            # v2.5.2 (audit OPUS R5) — un 304 signifie « le serveur certifie
+            # la fraîcheur de votre cache ». On publie le LKG TEL QUEL, mais
+            # marqué frais (from_last_known_good=False), avec fetched_at=now.
+            # C'est la sémantique HTTP correcte, et l'aval ne ment plus sur la
+            # fraîcheur.
+            if meta.get("http_status") == 304 and lkg_for_cond is not None:
+                feed_status["thisweek"] = "ok"
+                feed_status["revalidated"] = "304"
+                raw_list = lkg_for_cond["payload"]
+                # On reprend les métadonnées du cache mais on garde le sha256
+                # et le status du 304 — la signature du contenu n'a pas
+                # bougé, c'est tout l'intérêt d'un conditional GET.
+                meta["http_status"] = 304
+                meta["fetched_at_utc"] = iso_z(now)
+                state.record_success(now)
+                state.etag = meta.get("etag") or state.etag
+                state.last_modified = meta.get("last_modified") or state.last_modified
+            else:
+                feed_status["thisweek"] = "ok"
+                state.record_success(now)
+                # [audit OPUS] ETag/Last-Modified sont persistés à titre
+                # d'observation ET désormais utilisés pour le conditional
+                # GET (R5). Si un 304 survient, le corps est rejoué depuis le
+                # LKG — pas de risque de INVALID_JSON.
+                state.etag = meta.get("etag")
+                state.last_modified = meta.get("last_modified")
             # [câblage audit OPUS] Provenance de la FUSION préservée :
             # nextweek était fusionné sans que son hash ni ses octets ne
             # soient tracés — payload_sha256 ne couvrait que thisweek alors
@@ -733,6 +1076,15 @@ def _run_once_impl(data_dir: Path, policy: SelectionPolicy, session: requests.Se
                 "payload": raw_list,
             }, ensure_ascii=False).encode("utf-8"))
             _rotate_raw(data_dir / "raw", RAW_KEEP)
+        except RateLimited as exc:
+            # v2.5.2 (audit OPUS R2) — un quota ne compte pas comme une panne.
+            # Le cooldown est borné par RATE_LIMIT_MAX_S, persisté, et
+            # honore Retry-After quand il est raisonnable.
+            applied = state.record_rate_limit(now, exc.retry_after)
+            feed_status["thisweek"] = "rate_limited"
+            error = f"RATE_LIMITED:Retry-After={exc.retry_after}s→cooldown={applied}s"
+            LOG.warning("source 429 — cooldown %ds (Retry-After=%s)",
+                        applied, exc.retry_after)
         except FetchError as exc:
             error = str(exc)
             feed_status.setdefault("thisweek", f"error:{getattr(exc, 'code', 'ERR')}")
@@ -825,15 +1177,8 @@ def _run_once_impl(data_dir: Path, policy: SelectionPolicy, session: requests.Se
     state.last_content_hash = payload.content_hash
     state.last_publish_utc = iso_z(now)
     state.save()
-    # v2.5.0 — overlay actuals APRÈS publication réussie, JAMAIS bloquant :
-    # une panne site n'a aucune prise sur le cycle principal (le contrat
-    # canonique, lui, est déjà publié et vérifié).
-    try:
-        actuals_info = refresh_actuals_overlay(data_dir, session, now)
-    except Exception as exc:                                   # noqa: BLE001
-        LOG.exception("overlay actuals — échec inattendu, cycle principal intact")
-        actuals_info = {"error": f"UNEXPECTED: {type(exc).__name__}"}
-    write_health(data_dir, state, now, payload, error, actuals_info)
+    # v2.5.0 — overlay + health final sont désormais appelés par run_once
+    # APRÈS libération du verrou de publication (audit OPUS R6).
 
     LOG.info(
         "published %d events | status=%s | score=%.2f | content_%s | hash=%s",
@@ -841,7 +1186,47 @@ def _run_once_impl(data_dir: Path, policy: SelectionPolicy, session: requests.Se
         payload.quality.data_quality_score,
         "CHANGED" if changed else "unchanged", short_hash,
     )
-    return payload
+    # v2.5.2 (audit OPUS R6) — retourne le triplet (payload, state, now)
+    # pour que run_once puisse appeler l'overlay HORS du verrou.
+    return (payload, state, now)
+
+
+def emit_seed(data_dir: Path, seed_path: Path) -> Optional[Path]:
+    """v2.5.2 (audit OPUS R7) — fige le dernier artefact canonique en une
+    semence d'AFFICHAGE (lecture seule, jamais exportée sous calendar.json).
+
+    Pré-requis : calendar.latest.json doit exister dans data_dir (sinon,
+    retourne None — on ne fige pas du vide).
+
+    Format :
+        {"seed_schema": "bluestar-display-seed-1.0.0",
+         "warning": "ARTEFACT D'AFFICHAGE FIGÉ — ...",
+         "payload": <CalendarPayload.model_dump(mode="json")>}
+
+    La semence est commitée dans le dépôt (typiquement `seed/`), lue par
+    app.load_seed() au démarrage sur disque éphémère. Elle n'entre JAMAIS
+    dans le pipeline de production — pas de last_known_good, pas de hash
+    dans l'historique.
+    """
+    canonical = data_dir / "calendar.latest.json"
+    if not canonical.exists():
+        LOG.warning("emit_seed: aucun artefact canonique à figer")
+        return None
+    try:
+        payload_dict = json.loads(canonical.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        LOG.error("emit_seed: artefact illisible: %s", exc)
+        return None
+    seed_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(seed_path, {
+        "seed_schema": "bluestar-display-seed-1.0.0",
+        "warning": ("ARTEFACT D'AFFICHAGE FIGÉ — lecture seule, jamais "
+                    "exporté sous calendar.json. Le contrat de production "
+                    "reste calendar.latest.json, produit par l'ingestor."),
+        "payload": payload_dict,
+    })
+    LOG.info("emit_seed: semence écrite → %s", seed_path)
+    return seed_path
 
 
 _STOP = False
