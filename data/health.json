@@ -1,0 +1,39 @@
+{
+  "schema_version": "health-pipeline-1.1",
+  "core_schema_version": "2.4.1",
+  "status": "VALID",
+  "mode": "live",
+  "checked_at_utc": "2026-09-17T18:30:12Z",
+  "error": null,
+  "rate_limited": false,
+  "rate_limit": null,
+  "event_count": 22,
+  "data_quality_score": 1.0,
+  "content_hash": "sha256:9f2026159e9e5f5d849a875e37623ea7ecf883403c1ac25f39a415215202c5cb",
+  "warnings": [
+    "SOURCE_DOES_NOT_PROVIDE_ACTUAL"
+  ],
+  "feeds_status": {
+    "thisweek": "ok",
+    "nextweek": "absent_404"
+  },
+  "tz": {
+    "tzdata_pip_version": "2026.3",
+    "tzpath_head": "C:\\Users\\titan\\AppData\\Roaming\\Python\\Python312\\site-packages\\tzdata\\zoneinfo",
+    "pip_tzdata_authoritative": true,
+    "casablanca_offsets": {
+      "2026-09-19": [
+        1.0,
+        "+01"
+      ],
+      "2026-09-21": [
+        0.0,
+        "+00"
+      ],
+      "2027-03-01": [
+        0.0,
+        "+00"
+      ]
+    }
+  }
+}
