@@ -1,10 +1,21 @@
+# BLUESTAR — Midnight Luxe / base theme
+# Aligne le chrome NATIF de Streamlit sur la charte CSS (sans ce fichier,
+# les overlays/menus/spinners restent hors-charte).
+
 [theme]
 base = "dark"
-primaryColor = "#E5484D"
-backgroundColor = "#0B0D12"
-secondaryBackgroundColor = "#12151C"
-textColor = "#E7EAF0"
-font = "sans serif"
+primaryColor = "#22D3EE"
+backgroundColor = "#030712"
+secondaryBackgroundColor = "#080D18"
+textColor = "#F8FAFC"
+font = "sans-serif"
 
 [client]
 toolbarMode = "minimal"
+showErrorDetails = true
+
+[server]
+enableStaticServing = false
+
+[browser]
+gatherUsageStats = false
