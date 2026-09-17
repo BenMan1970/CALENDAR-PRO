@@ -1,27 +1,36 @@
 #!/usr/bin/env python3
 """
-BLUESTAR Pipeline Calendar — version simplifiée
-=============================================
+BLUESTAR Pipeline Calendar — ingesteur
+======================================
 Fetche les news économiques depuis Fair Economy (Forex Factory) et produit
-un .json riche consommé par le pipeline de merge.
+les artefacts JSON consommés par le pipeline de merge.
 
 FIX 429 (cause racine de l'écran vide sur Streamlit Cloud) :
   - 429 retiré de ``status_forcelist`` → urllib3 ne réessaie PAS un quota
-  - ``respect_retry_after_header=False`` → pas de sommeil de 247s dans le thread
+  - ``respect_retry_after_header=False`` → pas de sommeil de 247 s dans le thread
   - ``RateLimited`` est un événement de flux, pas une panne → breaker INTACT
-  - Cooldown minimal persé sur disque (rate_limit.json) entre deux tentatives
+  - cooldown persisté sur disque (rate_limit.json) entre deux tentatives
+
+CORRECTIF v1.1 (2026-09-17) — LE COOLDOWN 429 N'ÉTAIT JAMAIS HONORÉ :
+  ``apply_rate_limit`` écrivait la clé ``rate_limited_until_utc`` tandis que
+  ``is_rate_limited`` lisait ``blocked_until_utc``. Le garde retournait donc
+  toujours False et l'app retapait la source à chaque cycle, rallumant le
+  quota qu'on croyait éteint. Les deux fonctions partagent maintenant une
+  constante unique (``_RL_KEY``), l'ancienne clé restant écrite en alias
+  pour tout lecteur externe. Ajouts : ``read_rate_limit`` (état exposé à
+  l'UI), mode lecteur ``BLUESTAR_DISABLE_INGEST`` (B3), session HTTP
+  jetable par cycle (B4), archivage des octets bruts dans ``raw/``.
 
 Sources :
-  primaire  : https://nfs.faireconomy.media/ff_calendar_thisweek.json
-  secondaire: https://d1tcktd03x2wof.cloudfront.net/ff_calendar_thisweek.json
-  nextweek  : https://nfs.faireconomy.media/ff_calendar_nextweek.json  (bonus, 404 normal)
+  primaire   : https://nfs.faireconomy.media/ff_calendar_thisweek.json
+  secondaire : https://d1tcktd03x2wof.cloudfront.net/ff_calendar_thisweek.json
+  nextweek   : https://nfs.faireconomy.media/ff_calendar_nextweek.json (404 normal)
 
 Usage :
   python pipeline_calendar.py --once
   python pipeline_calendar.py --loop --interval 300
   python pipeline_calendar.py --once --data-dir /srv/data
-  python pipeline_calendar.py --once --output /tmp/calendar.json
-  python pipeline_calendar.py --seed   # écrit seed/ pour le cold-start Streamlit
+  python pipeline_calendar.py --seed
 """
 from __future__ import annotations
 
@@ -33,6 +42,7 @@ import os
 import sys
 import threading
 import time
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -41,8 +51,8 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# Le moteur de normalisation est réutilisé tel quel (calendar_core.py) :
-# le format JSON canonique et legacy est IMPACTÉ par le pipeline de merge.
+# Le moteur de normalisation est réutilisé TEL QUEL : le format canonique et
+# legacy est le contrat du pipeline de merge (parité de content_hash).
 from calendar_core import (
     SCHEMA_VERSION,
     CalendarPayload,
@@ -60,6 +70,13 @@ from calendar_core import (
 UTC = timezone.utc
 LOG = logging.getLogger("pipeline_calendar")
 
+__all__ = [
+    "SCHEMA_VERSION", "SOURCE_URLS", "MIN_FETCH_SPACING_S", "FetchError",
+    "RateLimited", "build_session", "fetch_source", "run_once", "emit_seed",
+    "is_rate_limited", "read_rate_limit", "apply_rate_limit", "clear_rate_limit",
+    "ingest_disabled", "tz_environment", "main",
+]
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
@@ -75,11 +92,12 @@ SOURCE_URL_NEXT = os.getenv(
 SOURCE_PROVIDER = "Forex Factory / Fair Economy weekly public feed"
 USER_AGENT = os.getenv(
     "BLUESTAR_USER_AGENT",
-    "BluestarPipelineCalendar/1.0 (+https://github.com/bluestar/calendar-pipeline)",
+    "BluestarPipelineCalendar/1.1 (+https://github.com/bluestar/calendar-pipeline)",
 )
 
+
 def _env_float(name: str, default: float) -> float:
-    """Vide ou illisible == défaut (pas de crash à l'import sur Streamlit Cloud)."""
+    """Vide ou illisible == défaut (pas de crash à l'import sur Cloud)."""
     raw = (os.getenv(name) or "").strip()
     if not raw:
         return default
@@ -101,13 +119,26 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_flag(name: str) -> bool:
+    return (os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 CONNECT_TIMEOUT = 5.0
 READ_TIMEOUT = 15.0
 FETCH_DEADLINE_S = _env_float("BLUESTAR_FETCH_DEADLINE_S", 90.0)
 MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
 MIN_FETCH_SPACING_S = _env_int("BLUESTAR_MIN_FETCH_SPACING_S", 120)
-RATE_LIMIT_COOLDOWN_S = 600   # 10 min après un 429
-RATE_LIMIT_MAX_COOLDOWN_S = 3600  # plafond 1h
+RATE_LIMIT_COOLDOWN_S = _env_int("BLUESTAR_RATE_LIMIT_COOLDOWN_S", 600)
+RATE_LIMIT_MAX_COOLDOWN_S = 3600
+ARCHIVE_RAW = _env_flag("BLUESTAR_ARCHIVE_RAW")
+
+# [B3] mode lecteur : l'UI sert les artefacts sur disque sans jamais toucher
+# au réseau (utile derrière un ingesteur externe type cron/GitHub Action).
+_DISABLE_INGEST_ENV = "BLUESTAR_DISABLE_INGEST"
+
+
+def ingest_disabled() -> bool:
+    return _env_flag(_DISABLE_INGEST_ENV)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -130,28 +161,23 @@ class RateLimited(RuntimeError):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SESSION HTTP (fix 429)
+# SESSION HTTP
 # ─────────────────────────────────────────────────────────────────────────────
 def build_session() -> requests.Session:
     """
-    [FIX 429] Session avec gestion correcte du taux de requête :
-
-    • ``429`` retiré de ``status_forcelist`` : un quota n'est PAS une panne réseau.
-    • ``respect_retry_after_header=False`` : urllib3 ne dort PLUS la durée du
-      Retry-After (247s mesuré) dans le thread de fetch.
-    • Retries (3) pour erreurs transitives uniquement (5xx, 408, timeout).
+    Session avec gestion correcte du taux de requête :
+      • ``429`` hors de ``status_forcelist`` : un quota n'est pas une panne ;
+      • ``respect_retry_after_header=False`` : aucun sommeil imposé au thread ;
+      • retries (3) réservés aux erreurs transitives (5xx, 408, timeout).
     """
     session = requests.Session()
     retry = Retry(
-        total=3,
-        connect=3,
-        read=3,
-        backoff_factor=1.5,
-        backoff_jitter=0.4,
-        status_forcelist=[408, 500, 502, 503, 504],  # 429 EXCLU
+        total=3, connect=3, read=3,
+        backoff_factor=1.5, backoff_jitter=0.4,
+        status_forcelist=[408, 500, 502, 503, 504],   # 429 EXCLU
         allowed_methods=frozenset(["GET"]),
         raise_on_status=False,
-        respect_retry_after_header=False,  # [KEY FIX]
+        respect_retry_after_header=False,             # [KEY FIX]
     )
     adapter = HTTPAdapter(max_retries=retry, pool_maxsize=4)
     session.mount("https://", adapter)
@@ -165,24 +191,27 @@ def build_session() -> requests.Session:
 
 
 def parse_retry_after(value: Optional[str], now: datetime) -> Optional[float]:
-    """RFC 9110 : delta-seconds OU HTTP-date. Retourne None si illisible."""
+    """RFC 9110 : delta-seconds OU HTTP-date. None si illisible."""
     if not value:
         return None
     try:
         return float(value)
     except (ValueError, TypeError):
         pass
-    try:
-        dt = datetime.strptime(value, "%a, %d %b %Y %H:%M:%S %Z")
-        return max(0.0, (dt.replace(tzinfo=UTC) - now).total_seconds())
-    except (ValueError, TypeError):
-        return None
+    for fmt in ("%a, %d %b %Y %H:%M:%S %Z", "%a, %d %b %Y %H:%M:%S GMT"):
+        try:
+            dt = datetime.strptime(value, fmt)
+            return max(0.0, (dt.replace(tzinfo=UTC) - now).total_seconds())
+        except (ValueError, TypeError):
+            continue
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FETCH AVEC PLAFOND DE TEMPS (H7)
+# FETCH AVEC PLAFOND DE TEMPS
 # ─────────────────────────────────────────────────────────────────────────────
-def _fetch_blocking(session: requests.Session, url: str, deadline_s: float) -> Tuple[Any, Dict[str, Any]]:
+def _fetch_blocking(session: requests.Session, url: str,
+                    deadline_s: float) -> Tuple[Any, Dict[str, Any]]:
     started = time.monotonic()
     try:
         response = session.get(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), stream=True)
@@ -193,12 +222,9 @@ def _fetch_blocking(session: requests.Session, url: str, deadline_s: float) -> T
 
     with response:
         status = response.status_code
-
-        # [FIX 429] Détection manuelle du 429
         if status == 429:
             ra = parse_retry_after(response.headers.get("Retry-After"), datetime.now(UTC))
             raise RateLimited(ra if ra is not None else float(RATE_LIMIT_COOLDOWN_S))
-
         if status >= 400:
             raise FetchError("HTTP_ERROR", f"status={status}")
 
@@ -240,16 +266,16 @@ def _fetch_blocking(session: requests.Session, url: str, deadline_s: float) -> T
 def _fetch_with_deadline(session: requests.Session, url: str,
                          deadline_s: float = FETCH_DEADLINE_S) -> Tuple[Any, Dict[str, Any]]:
     """
-    [H7] Plafond dur au temps mural total. Le fetch bloquant est exécuté dans
-    un thread daemon ; s'il dépasse le budget, le thread est abandonné (zombie
-    meurt à l'EOF ou au timeout interne). Le cycle, lui, est à l'heure.
+    Plafond dur au temps mural total. Le fetch bloquant tourne dans un thread
+    daemon ; s'il dépasse le budget il est abandonné (le zombie meurt sur son
+    propre timeout socket). Le cycle, lui, reste à l'heure.
     """
     outcome: Dict[str, Any] = {}
 
     def _worker():
         try:
             outcome["value"] = _fetch_blocking(session, url, deadline_s)
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:                          # noqa: BLE001
             outcome["error"] = exc
 
     th = threading.Thread(target=_worker, daemon=True, name="pipeline-fetch")
@@ -268,27 +294,27 @@ def _fetch_with_deadline(session: requests.Session, url: str,
 
 def fetch_source(session: requests.Session) -> Tuple[List[Dict], Dict[str, Any], Dict[str, str]]:
     """
-    Tente les URLs primaire → secondaire, puis nextweek en bonus.
-    Retourne (raw_events, meta, feed_status).
-
-    Le 429 est propage via RateLimited (pas de retry, pas de sommeil).
+    Primaire → secondaire, puis nextweek en bonus.
+    Retourne (raw_events, meta, feed_status). Un 429 remonte en RateLimited
+    (sans retry, sans sommeil).
     """
     meta: Dict[str, Any] = {}
     feed_status: Dict[str, str] = {}
     feed_shas: Dict[str, str] = {}
+    raw_bytes: Dict[str, bytes] = {}
     raw_list: Optional[List[Dict]] = None
     total_bytes = 0
 
-    # --- Primaire ---
     for i, url in enumerate(SOURCE_URLS):
         try:
             raw_list, meta = _fetch_with_deadline(session, url)
             feed_status["thisweek"] = "ok"
             feed_shas["thisweek"] = str(meta.get("payload_sha256"))
+            raw_bytes["thisweek"] = meta.pop("raw_bytes", b"")
             total_bytes = int(meta.get("payload_bytes") or 0)
             break
         except RateLimited:
-            raise  # le quota est un arrêt immédiat
+            raise                                             # quota = arrêt net
         except FetchError as exc:
             feed_status["thisweek"] = f"error:{exc.code}"
             LOG.warning("source #%d (%s) failed: %s", i + 1, url, exc)
@@ -299,7 +325,6 @@ def fetch_source(session: requests.Session) -> Tuple[List[Dict], Dict[str, Any],
     if raw_list is None:
         raise FetchError("ALL_SOURCES_FAILED", "all primary URLs exhausted")
 
-    # --- Next week (bonus, jamais bloquant) ---
     if SOURCE_URL_NEXT:
         try:
             extra, extra_meta = _fetch_with_deadline(session, SOURCE_URL_NEXT)
@@ -307,6 +332,7 @@ def fetch_source(session: requests.Session) -> Tuple[List[Dict], Dict[str, Any],
                 raw_list = list(raw_list) + extra
                 feed_status["nextweek"] = "ok"
                 feed_shas["nextweek"] = str(extra_meta.get("payload_sha256"))
+                raw_bytes["nextweek"] = extra_meta.pop("raw_bytes", b"")
                 total_bytes += int(extra_meta.get("payload_bytes") or 0)
         except FetchError as exc:
             if exc.code == "HTTP_ERROR" and "status=404" in str(exc):
@@ -318,11 +344,13 @@ def fetch_source(session: requests.Session) -> Tuple[List[Dict], Dict[str, Any],
             feed_status["nextweek"] = "rate_limited"
             LOG.warning("nextweek fetch rate-limited (bonus, non-blocking)")
 
-    ordered_shas = [feed_shas[k] for k in ("thisweek", "nextweek") if k in feed_shas]
-    meta["payload_sha256"] = "sha256:" + sha256_hex("|".join(ordered_shas)) if ordered_shas else "sha256:unknown"
+    ordered = [feed_shas[k] for k in ("thisweek", "nextweek") if k in feed_shas]
+    meta["payload_sha256"] = ("sha256:" + sha256_hex("|".join(ordered))
+                              if ordered else "sha256:unknown")
     meta["payload_bytes"] = total_bytes
     meta["feed_status"] = dict(feed_status)
     meta["feed_sha256"] = dict(feed_shas)
+    meta["raw_by_feed"] = raw_bytes
     return raw_list, meta, feed_status
 
 
@@ -331,12 +359,12 @@ def fetch_source(session: requests.Session) -> Tuple[List[Dict], Dict[str, Any],
 # ─────────────────────────────────────────────────────────────────────────────
 def atomic_write_bytes(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
+    tmp = path.parent / f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
     try:
-        with open(tmp, "wb") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, path)
     finally:
         if tmp.exists():
@@ -347,8 +375,7 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
 
 
 def atomic_write_json(path: Path, obj: Any) -> None:
-    data = json.dumps(obj, indent=2, ensure_ascii=False).encode("utf-8")
-    atomic_write_bytes(path, data)
+    atomic_write_bytes(path, json.dumps(obj, indent=2, ensure_ascii=False).encode("utf-8"))
 
 
 def read_json(path: Path) -> Optional[Any]:
@@ -359,57 +386,82 @@ def read_json(path: Path) -> Optional[Any]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GESTION DU COOLDOWN 429 (persisté sur disque)
+# COOLDOWN 429 (persisté sur disque)
 # ─────────────────────────────────────────────────────────────────────────────
+# [CORRECTIF v1.1] UNE seule clé, partagée par l'écrivain et le lecteur.
+_RL_KEY = "blocked_until_utc"
+
+
 def _rate_limit_path(data_dir: Path) -> Path:
     return data_dir / "rate_limit.json"
 
 
+def read_rate_limit(data_dir: Path) -> Optional[Dict[str, Any]]:
+    """État de cooldown exposé à l'UI (None si aucun fichier)."""
+    rl = read_json(_rate_limit_path(data_dir))
+    return rl if isinstance(rl, dict) else None
+
+
 def is_rate_limited(data_dir: Path, now: Optional[datetime] = None) -> bool:
-    """True si on est encore sous le cooldown 429."""
+    """True si le cooldown 429 court encore."""
     if now is None:
         now = datetime.now(UTC)
-    rl = read_json(_rate_limit_path(data_dir))
+    rl = read_rate_limit(data_dir)
     if not rl:
         return False
-    blocked_until = rl.get("blocked_until_utc")
-    if not blocked_until:
+    # Alias historique toléré en lecture (fichiers écrits par la v1.0).
+    stamp = rl.get(_RL_KEY) or rl.get("rate_limited_until_utc")
+    if not stamp:
         return False
     try:
-        until = datetime.fromisoformat(blocked_until.replace("Z", "+00:00"))
+        until = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
     except (ValueError, TypeError):
         return False
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=UTC)
     return now < until
 
 
 def apply_rate_limit(data_dir: Path, retry_after: Optional[float]) -> None:
-    """Persiste le cooldown 429 sur disque."""
+    """Persiste le cooldown 429."""
     if retry_after is None:
         retry_after = float(RATE_LIMIT_COOLDOWN_S)
-    cooldown = max(RATE_LIMIT_COOLDOWN_S, min(float(retry_after), RATE_LIMIT_MAX_COOLDOWN_S))
+    cooldown = max(float(RATE_LIMIT_COOLDOWN_S),
+                   min(float(retry_after), float(RATE_LIMIT_MAX_COOLDOWN_S)))
     until = datetime.now(UTC) + timedelta(seconds=cooldown)
     atomic_write_json(_rate_limit_path(data_dir), {
-        "rate_limited_until_utc": iso_z(until),
+        _RL_KEY: iso_z(until),
+        "rate_limited_until_utc": iso_z(until),   # alias rétro-compatible
         "retry_after": retry_after,
         "cooldown_s": cooldown,
+        "applied_at_utc": iso_z(datetime.now(UTC)),
     })
     LOG.warning("rate-limited — cooldown %ds until %s", int(cooldown), iso_z(until))
+
+
+def clear_rate_limit(data_dir: Path) -> None:
+    try:
+        _rate_limit_path(data_dir).unlink()
+    except OSError:
+        pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CYCLE D'INGESTION
 # ─────────────────────────────────────────────────────────────────────────────
-def write_health(data_dir: Path, state: Dict[str, Any], now: datetime,
-                 payload: Optional[CalendarPayload], error: Optional[str],
-                 rate_limited: bool = False) -> None:
+def write_health(data_dir: Path, now: datetime, payload: Optional[CalendarPayload],
+                 error: Optional[str], *, rate_limited: bool = False,
+                 mode: str = "live") -> None:
     status = payload.quality.status.value if payload else "UNAVAILABLE"
     atomic_write_json(data_dir / "health.json", {
-        "schema_version": "health-pipeline-1.0",
+        "schema_version": "health-pipeline-1.1",
         "core_schema_version": SCHEMA_VERSION,
         "status": status,
+        "mode": mode,
         "checked_at_utc": iso_z(now),
         "error": error,
         "rate_limited": rate_limited,
+        "rate_limit": read_rate_limit(data_dir) if rate_limited else None,
         "event_count": len(payload.events) if payload else 0,
         "data_quality_score": payload.quality.data_quality_score if payload else 0.0,
         "content_hash": payload.content_hash if payload else None,
@@ -419,43 +471,60 @@ def write_health(data_dir: Path, state: Dict[str, Any], now: datetime,
     })
 
 
-def run_once(data_dir: Path, session: requests.Session,
+def _archive_raw(data_dir: Path, raw_by_feed: Dict[str, bytes], now: datetime) -> None:
+    """Archive les octets bruts par flux (traçabilité de la FUSION)."""
+    if not ARCHIVE_RAW or not raw_by_feed:
+        return
+    stamp = now.strftime("%Y%m%dT%H%M%SZ")
+    for feed, blob in raw_by_feed.items():
+        if blob:
+            atomic_write_bytes(data_dir / "raw" / f"{feed}.{stamp}.json", blob)
+
+
+def run_once(data_dir: Path, session: Optional[requests.Session] = None,
              policy: Optional[SelectionPolicy] = None) -> Optional[CalendarPayload]:
     """
-    Cycle unique : fetch → normalize → write 3 fichiers.
+    Cycle unique : fetch → normalize → écriture des artefacts.
 
-    • ``calendar.latest.json``  — format canonique v2 (rich)
-    • ``calendar.json``         — format legacy v1 (consommé par le merge)
-    • ``health.json``           — supervision
+      • ``calendar.latest.json`` — canonique v2 (riche)
+      • ``calendar.json``        — legacy v1 (consommé par le merge)
+      • ``calendar.legacy.json`` — copie de secours
+      • ``health.json``          — supervision
 
-    [FIX 429] Un 429 active un cooldown persé, ne casse pas le breaker,
-    ne rentre pas en échec. Le LKG (dernier fichier sur disque) reste servi.
+    Un 429 pose un cooldown persisté, ne casse pas le breaker et n'écrase
+    JAMAIS l'artefact précédent (le LKG sur disque continue d'être servi).
+
+    ``session=None`` → session HTTP jetable créée et fermée dans le cycle [B4].
     """
-    if policy is None:
-        policy = DEFAULT_POLICY
+    policy = policy or DEFAULT_POLICY
     now = datetime.now(UTC)
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    # Cooldown 429 ?
-    if is_rate_limited(data_dir):
-        LOG.warning("rate-limit cooldown active — serving existing file")
-        write_health(data_dir, {}, now, None, "RATE_LIMIT_COOLDOWN", rate_limited=True)
+    if ingest_disabled():
+        LOG.info("ingestion disabled (%s) — reader mode", _DISABLE_INGEST_ENV)
+        write_health(data_dir, now, None, "INGEST_DISABLED", mode="reader")
         return None
+
+    if is_rate_limited(data_dir, now):
+        LOG.warning("rate-limit cooldown active — serving existing artifact")
+        write_health(data_dir, now, None, "RATE_LIMIT_COOLDOWN",
+                     rate_limited=True, mode="cooldown")
+        return None
+
+    owns_session = session is None
+    session = session or build_session()
 
     raw_list: Optional[List[Dict]] = None
     meta: Dict[str, Any] = {}
     feed_status: Dict[str, str] = {}
     error: Optional[str] = None
-    rate_limited = False
 
     try:
-        raw_list, meta, feed_status = fetch_source(session)
+        with closing(session) if owns_session else _nullcontext():
+            raw_list, meta, feed_status = fetch_source(session)
     except RateLimited as exc:
-        rate_limited = True
-        error = str(exc)
         apply_rate_limit(data_dir, exc.retry_after)
-        write_health(data_dir, {}, now, None, error, rate_limited=True)
-        # Le fichier précédent reste sur disque — pas d'écrasement
+        write_health(data_dir, now, None, str(exc), rate_limited=True, mode="cooldown")
         LOG.warning("rate-limited — previous artifact untouched")
         return None
     except FetchError as exc:
@@ -463,9 +532,10 @@ def run_once(data_dir: Path, session: requests.Session,
         LOG.error("fetch failed: %s", error)
 
     if raw_list is None:
-        state = {"consecutive_failures": 1}
-        write_health(data_dir, state, now, None, error)
+        write_health(data_dir, now, None, error or "NO_DATA")
         return None
+
+    _archive_raw(data_dir, meta.pop("raw_by_feed", {}) or {}, now)
 
     source = SourceInfo(
         provider=SOURCE_PROVIDER,
@@ -486,46 +556,48 @@ def run_once(data_dir: Path, session: requests.Session,
 
     try:
         payload = build_payload(raw_list, source=source, now_utc=now, policy=policy)
-    except Exception as exc:  # noqa: BLE001
-        error = f"NORMALIZATION_FAILED: {exc}"
+    except Exception as exc:                                  # noqa: BLE001
         LOG.exception("normalization failed")
-        write_health(data_dir, {}, now, None, error)
+        write_health(data_dir, now, None, f"NORMALIZATION_FAILED: {exc}")
         return None
 
     if payload.quality.status is QualityStatus.INVALID:
         error = f"QUALITY_INVALID: {list(payload.quality.warnings)}"
-        LOG.error("payload rejected (INVALID)")
-        write_health(data_dir, {}, now, payload, error)
+        LOG.error("payload rejected (INVALID) — previous artifact untouched")
+        write_health(data_dir, now, payload, error)
         return None
 
-    # Écriture atomique des 3 artefacts
     canonical = payload.model_dump(mode="json")
     legacy = to_legacy_payload(payload, now)
 
     atomic_write_json(data_dir / "calendar.latest.json", canonical)
     atomic_write_json(data_dir / "calendar.json", legacy)
-    atomic_write_json(data_dir / "calendar.legacy.json", legacy)  # backup identique
+    atomic_write_json(data_dir / "calendar.legacy.json", legacy)
+    write_health(data_dir, now, payload, None)
+    clear_rate_limit(data_dir)
 
-    write_health(data_dir, {}, now, payload, None)
-
-    LOG.info(
-        "published %d events | status=%s | score=%.2f | hash=%s",
-        len(payload.events),
-        payload.quality.status.value,
-        payload.quality.data_quality_score,
-        (payload.content_hash or "").split(":")[-1][:12],
-    )
+    LOG.info("published %d events | status=%s | score=%.2f | hash=%s",
+             len(payload.events), payload.quality.status.value,
+             payload.quality.data_quality_score,
+             (payload.content_hash or "").split(":")[-1][:12])
     return payload
 
 
+class _nullcontext:
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *exc):
+        return False
+
+
 def emit_seed(data_dir: Path, session: Optional[requests.Session] = None) -> Optional[Path]:
-    """Produit seed/calendar.latest.seed.json pour le cold-start Streamlit Cloud."""
-    if session is None:
-        session = build_session()
+    """Produit seed/calendar.latest.seed.json pour le cold-start Cloud."""
     seed_dir = data_dir / "seed"
     seed_dir.mkdir(parents=True, exist_ok=True)
     payload = run_once(data_dir, session)
     if payload is None:
+        LOG.error("seed not written (no valid payload)")
         return None
     seed_path = seed_dir / "calendar.latest.seed.json"
     atomic_write_json(seed_path, payload.model_dump(mode="json"))
@@ -538,38 +610,40 @@ def emit_seed(data_dir: Path, session: Optional[requests.Session] = None) -> Opt
 # ─────────────────────────────────────────────────────────────────────────────
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="BLUESTAR Pipeline Calendar — economic news ingestor"
-    )
+        description="BLUESTAR Pipeline Calendar — economic news ingestor")
     parser.add_argument("--once", action="store_true", help="un seul cycle puis sortie")
     parser.add_argument("--loop", action="store_true", help="boucle continue")
     parser.add_argument("--interval", type=int, default=300, help="secondes entre cycles")
     parser.add_argument("--data-dir", type=Path, default=None, help="répertoire de sortie")
-    parser.add_argument("--seed", action="store_true", help="génère le seed pour cold-start")
+    parser.add_argument("--seed", action="store_true", help="génère le seed de cold-start")
+    parser.add_argument("--clear-cooldown", action="store_true",
+                        help="supprime rate_limit.json puis sort")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
 
-    # Logging JSON structuré, UTC
     logging.Formatter.converter = time.gmtime
     logging.basicConfig(
-        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        level=getattr(logging, str(args.log_level).upper(), logging.INFO),
         format='{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}',
         datefmt="%Y-%m-%dT%H:%M:%SZ",
     )
+    LOG.info("tz environment: %s", json.dumps(tz_environment(), default=str))
 
     data_dir = args.data_dir or Path(__file__).resolve().parent / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.seed:
-        path = emit_seed(data_dir)
-        return 0 if path else 1
+    if args.clear_cooldown:
+        clear_rate_limit(data_dir)
+        LOG.info("cooldown cleared")
+        return 0
 
-    policy = DEFAULT_POLICY
-    session = build_session()
+    if args.seed:
+        return 0 if emit_seed(data_dir) else 1
 
     if args.loop:
         import signal
 
-        def _signal(signum, frame):
+        def _signal(signum, _frame):
             LOG.info("signal %s — shutting down", signum)
             raise SystemExit(0)
 
@@ -579,15 +653,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         LOG.info("entering loop mode, interval=%ds", args.interval)
         while True:
             try:
-                run_once(data_dir, session, policy)
-            except Exception:  # noqa: BLE001
+                run_once(data_dir)
+            except Exception:                                 # noqa: BLE001
                 LOG.exception("unhandled error in cycle")
             time.sleep(max(5, args.interval))
-        return 0
 
-    # --once (défaut)
-    result = run_once(data_dir, session, policy)
-    return 0 if result else 2
+    result = run_once(data_dir)
+    if result is not None:
+        return 0
+    # [B3] exit 3 = « rien publié mais rien de cassé » (cooldown/mode lecteur),
+    # distinct de exit 2 (échec réel) pour ne pas alerter un orchestrateur.
+    if ingest_disabled() or is_rate_limited(data_dir):
+        return 3
+    return 2
 
 
 if __name__ == "__main__":
