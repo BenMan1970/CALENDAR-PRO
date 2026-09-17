@@ -118,7 +118,7 @@ def currency_exposure(events: Sequence[dict], height: int = 210, top: int = 9):
         textfont=dict(family="JetBrains Mono, monospace", size=10, color=T.MUTED),
         hovertemplate="<b>%{y}</b> · %{x} publication(s)<extra></extra>",
     ))
-    fig.update_layout(**_layout(height, ygrid=False, xgrid=True), bargap=0.32)
+    fig.update_layout(**_layout(height, ygrid=False, xgrid=True))
     fig.update_xaxes(visible=False, range=[0, vmax * 1.18])
     fig.update_yaxes(tickfont=dict(family="JetBrains Mono, monospace", size=11, color=T.MUTED))
     return fig
@@ -138,3 +138,4 @@ def quality_sparkline(scores: List[float], height: int = 90):
     fig.update_xaxes(visible=False)
     fig.update_yaxes(visible=False, range=[0, 1.05])
     return fig
+
