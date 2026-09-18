@@ -1,19 +1,19 @@
 {
   "schema_version": "2.4.1",
-  "generated_at_utc": "2026-09-18T13:29:04Z",
+  "generated_at_utc": "2026-09-18T14:32:56Z",
   "generator": "bluestar-calendar-ingestor",
-  "content_hash": "sha256:c1a1e0bd50be15b991e3c74f8e6df021ebc47826a51cc64f415d200fdd73b232",
+  "content_hash": "sha256:b76f6c9a2956944cb367850cefb48b7e60a025836d95c416b9feaf7b4b539827",
   "source": {
     "provider": "Forex Factory / Fair Economy weekly public feed",
     "url": "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
-    "fetched_at_utc": "2026-09-18T13:29:04Z",
-    "fetch_duration_ms": 1032,
+    "fetched_at_utc": "2026-09-18T14:32:56Z",
+    "fetch_duration_ms": 1359,
     "http_status": 200,
     "content_type": "application/json",
     "payload_bytes": 13920,
     "payload_sha256": "sha256:9717df3658b1291d67d554208fb23859e95bf7b391dab99e803249c8a4caffe5",
-    "etag": "W/\"6aad31aa-3660\"",
-    "last_modified": "Fri, 18 Sep 2026 12:42:18 GMT",
+    "etag": "W/\"6aad3fb7-3660\"",
+    "last_modified": "Fri, 18 Sep 2026 13:42:15 GMT",
     "supports_actual": false,
     "from_last_known_good": false,
     "feed_status": {
@@ -29,7 +29,7 @@
     "is_stale": false,
     "source_age_seconds": 0,
     "raw_event_count": 104,
-    "accepted_event_count": 20,
+    "accepted_event_count": 19,
     "rejected_event_count": 0,
     "duplicate_event_count": 0,
     "coverage_start_utc": "2026-09-13T08:15:00Z",
@@ -59,8 +59,8 @@
     "max_events": 2000
   },
   "coverage": {
-    "window_start_utc": "2026-09-15T13:29:04Z",
-    "window_end_utc": "2026-09-25T13:29:04Z",
+    "window_start_utc": "2026-09-15T14:32:56Z",
+    "window_end_utc": "2026-09-25T14:32:56Z",
     "currencies_scope": [
       "AUD",
       "CAD",
@@ -91,69 +91,6 @@
   "session_policy_version": "exchange_local_dst_aware_v2",
   "numeric_parser_version": "ff_numeric_v2",
   "events": [
-    {
-      "occurrence_id": "b9e4fc50e733e6c908fd5061cbfcbb4c",
-      "event_type_id": "ff:usd:treasury-sec-bessent-speaks",
-      "release_group_id": null,
-      "release_group_type": null,
-      "currency": "USD",
-      "is_global": false,
-      "name": "Treasury Sec Bessent Speaks",
-      "scheduled_at_utc": "2026-09-15T14:00:00Z",
-      "scheduled_at_display": "2026-09-15T15:00:00+01:00",
-      "display_timezone": "Africa/Casablanca",
-      "date_utc": "2026-09-15",
-      "date_display": "2026-09-15",
-      "day_of_week": "TUESDAY",
-      "impact": "MEDIUM",
-      "session": "OVERLAP_LONDON_NY",
-      "active_market_centers": [
-        "LONDON",
-        "NEW_YORK"
-      ],
-      "forecast": {
-        "raw": null,
-        "value": null,
-        "unit": null,
-        "scale": null,
-        "parse_status": "ABSENT"
-      },
-      "previous": {
-        "raw": null,
-        "value": null,
-        "unit": null,
-        "scale": null,
-        "parse_status": "ABSENT"
-      },
-      "actual": {
-        "raw": null,
-        "value": null,
-        "unit": null,
-        "scale": null,
-        "parse_status": "ABSENT"
-      },
-      "actual_status": "UNSUPPORTED_BY_SOURCE",
-      "pairs_with_currency_exposure": [
-        "EUR/USD",
-        "GBP/USD",
-        "USD/JPY",
-        "USD/CHF",
-        "USD/CAD",
-        "AUD/USD",
-        "NZD/USD"
-      ],
-      "pair_mapping_status": "MAPPED",
-      "pair_mapping_method": "static_currency_membership_v1",
-      "source_index": 35,
-      "time_context": {
-        "computed_at_utc": "2026-09-18T13:29:04Z",
-        "hours_until": -71.4844,
-        "hours_until_display": "2d 23h 29m ago",
-        "is_upcoming": false,
-        "time_proximity": "PAST",
-        "status": "PAST_SCHEDULE"
-      }
-    },
     {
       "occurrence_id": "f669a81ca51b1ece56626a9de63535ad",
       "event_type_id": "ff:gbp:cpi-y-y",
@@ -208,9 +145,9 @@
       "pair_mapping_method": "static_currency_membership_v1",
       "source_index": 43,
       "time_context": {
-        "computed_at_utc": "2026-09-18T13:29:04Z",
-        "hours_until": -55.4844,
-        "hours_until_display": "2d 7h 29m ago",
+        "computed_at_utc": "2026-09-18T14:32:56Z",
+        "hours_until": -56.549,
+        "hours_until_display": "2d 8h 33m ago",
         "is_upcoming": false,
         "time_proximity": "PAST",
         "status": "PAST_SCHEDULE"
@@ -271,9 +208,9 @@
       "pair_mapping_method": "static_currency_membership_v1",
       "source_index": 53,
       "time_context": {
-        "computed_at_utc": "2026-09-18T13:29:04Z",
-        "hours_until": -48.9844,
-        "hours_until_display": "2d 0h 59m ago",
+        "computed_at_utc": "2026-09-18T14:32:56Z",
+        "hours_until": -50.049,
+        "hours_until_display": "2d 2h 3m ago",
         "is_upcoming": false,
         "time_proximity": "PAST",
         "status": "PAST_SCHEDULE"
@@ -334,9 +271,9 @@
       "pair_mapping_method": "static_currency_membership_v1",
       "source_index": 54,
       "time_context": {
-        "computed_at_utc": "2026-09-18T13:29:04Z",
-        "hours_until": -48.9844,
-        "hours_until_display": "2d 0h 59m ago",
+        "computed_at_utc": "2026-09-18T14:32:56Z",
+        "hours_until": -50.049,
+        "hours_until_display": "2d 2h 3m ago",
         "is_upcoming": false,
         "time_proximity": "PAST",
         "status": "PAST_SCHEDULE"
@@ -397,9 +334,9 @@
       "pair_mapping_method": "static_currency_membership_v1",
       "source_index": 62,
       "time_context": {
-        "computed_at_utc": "2026-09-18T13:29:04Z",
-        "hours_until": -43.4844,
-        "hours_until_display": "1d 19h 29m ago",
+        "computed_at_utc": "2026-09-18T14:32:56Z",
+        "hours_until": -44.549,
+        "hours_until_display": "1d 20h 33m ago",
         "is_upcoming": false,
         "time_proximity": "PAST",
         "status": "PAST_SCHEDULE"
@@ -460,9 +397,9 @@
       "pair_mapping_method": "static_currency_membership_v1",
       "source_index": 63,
       "time_context": {
-        "computed_at_utc": "2026-09-18T13:29:04Z",
-        "hours_until": -43.4844,
-        "hours_until_display": "1d 19h 29m ago",
+        "computed_at_utc": "2026-09-18T14:32:56Z",
+        "hours_until": -44.549,
+        "hours_until_display": "1d 20h 33m ago",
         "is_upcoming": false,
         "time_proximity": "PAST",
         "status": "PAST_SCHEDULE"
@@ -523,9 +460,9 @@
       "pair_mapping_method": "static_currency_membership_v1",
       "source_index": 61,
       "time_context": {
-        "computed_at_utc": "2026-09-18T13:29:04Z",
-        "hours_until": -43.4844,
-        "hours_until_display": "1d 19h 29m ago",
+        "computed_at_utc": "2026-09-18T14:32:56Z",
+        "hours_until": -44.549,
+        "hours_until_display": "1d 20h 33m ago",
         "is_upcoming": false,
         "time_proximity": "PAST",
         "status": "PAST_SCHEDULE"
@@ -586,9 +523,9 @@
       "pair_mapping_method": "static_currency_membership_v1",
       "source_index": 64,
       "time_context": {
-        "computed_at_utc": "2026-09-18T13:29:04Z",
-        "hours_until": -42.9844,
-        "hours_until_display": "1d 18h 59m ago",
+        "computed_at_utc": "2026-09-18T14:32:56Z",
+        "hours_until": -44.049,
+        "hours_until_display": "1d 20h 3m ago",
         "is_upcoming": false,
         "time_proximity": "PAST",
         "status": "PAST_SCHEDULE"
@@ -649,9 +586,9 @@
       "pair_mapping_method": "static_currency_membership_v1",
       "source_index": 66,
       "time_context": {
-        "computed_at_utc": "2026-09-18T13:29:04Z",
-        "hours_until": -38.7344,
-        "hours_until_display": "1d 14h 44m ago",
+        "computed_at_utc": "2026-09-18T14:32:56Z",
+        "hours_until": -39.799,
+        "hours_until_display": "1d 15h 48m ago",
         "is_upcoming": false,
         "time_proximity": "PAST",
         "status": "PAST_SCHEDULE"
@@ -711,9 +648,9 @@
       "pair_mapping_method": "static_currency_membership_v1",
       "source_index": 72,
       "time_context": {
-        "computed_at_utc": "2026-09-18T13:29:04Z",
-        "hours_until": -26.4844,
-        "hours_until_display": "1d 2h 29m ago",
+        "computed_at_utc": "2026-09-18T14:32:56Z",
+        "hours_until": -27.549,
+        "hours_until_display": "1d 3h 33m ago",
         "is_upcoming": false,
         "time_proximity": "PAST",
         "status": "PAST_SCHEDULE"
@@ -773,9 +710,9 @@
       "pair_mapping_method": "static_currency_membership_v1",
       "source_index": 71,
       "time_context": {
-        "computed_at_utc": "2026-09-18T13:29:04Z",
-        "hours_until": -26.4844,
-        "hours_until_display": "1d 2h 29m ago",
+        "computed_at_utc": "2026-09-18T14:32:56Z",
+        "hours_until": -27.549,
+        "hours_until_display": "1d 3h 33m ago",
         "is_upcoming": false,
         "time_proximity": "PAST",
         "status": "PAST_SCHEDULE"
@@ -835,9 +772,9 @@
       "pair_mapping_method": "static_currency_membership_v1",
       "source_index": 73,
       "time_context": {
-        "computed_at_utc": "2026-09-18T13:29:04Z",
-        "hours_until": -26.4844,
-        "hours_until_display": "1d 2h 29m ago",
+        "computed_at_utc": "2026-09-18T14:32:56Z",
+        "hours_until": -27.549,
+        "hours_until_display": "1d 3h 33m ago",
         "is_upcoming": false,
         "time_proximity": "PAST",
         "status": "PAST_SCHEDULE"
@@ -898,9 +835,9 @@
       "pair_mapping_method": "static_currency_membership_v1",
       "source_index": 78,
       "time_context": {
-        "computed_at_utc": "2026-09-18T13:29:04Z",
-        "hours_until": -24.9844,
-        "hours_until_display": "1d 0h 59m ago",
+        "computed_at_utc": "2026-09-18T14:32:56Z",
+        "hours_until": -26.049,
+        "hours_until_display": "1d 2h 3m ago",
         "is_upcoming": false,
         "time_proximity": "PAST",
         "status": "PAST_SCHEDULE"
@@ -961,9 +898,9 @@
       "pair_mapping_method": "static_currency_membership_v1",
       "source_index": 79,
       "time_context": {
-        "computed_at_utc": "2026-09-18T13:29:04Z",
-        "hours_until": -24.9844,
-        "hours_until_display": "1d 0h 59m ago",
+        "computed_at_utc": "2026-09-18T14:32:56Z",
+        "hours_until": -26.049,
+        "hours_until_display": "1d 2h 3m ago",
         "is_upcoming": false,
         "time_proximity": "PAST",
         "status": "PAST_SCHEDULE"
@@ -1025,9 +962,9 @@
       "pair_mapping_method": "static_currency_membership_v1",
       "source_index": 87,
       "time_context": {
-        "computed_at_utc": "2026-09-18T13:29:04Z",
-        "hours_until": -13.9844,
-        "hours_until_display": "13h 59m ago",
+        "computed_at_utc": "2026-09-18T14:32:56Z",
+        "hours_until": -15.049,
+        "hours_until_display": "15h 3m ago",
         "is_upcoming": false,
         "time_proximity": "PAST",
         "status": "PAST_SCHEDULE"
@@ -1088,9 +1025,9 @@
       "pair_mapping_method": "static_currency_membership_v1",
       "source_index": 89,
       "time_context": {
-        "computed_at_utc": "2026-09-18T13:29:04Z",
-        "hours_until": -10.5844,
-        "hours_until_display": "10h 35m ago",
+        "computed_at_utc": "2026-09-18T14:32:56Z",
+        "hours_until": -11.649,
+        "hours_until_display": "11h 39m ago",
         "is_upcoming": false,
         "time_proximity": "PAST",
         "status": "PAST_SCHEDULE"
@@ -1151,9 +1088,9 @@
       "pair_mapping_method": "static_currency_membership_v1",
       "source_index": 90,
       "time_context": {
-        "computed_at_utc": "2026-09-18T13:29:04Z",
-        "hours_until": -10.5844,
-        "hours_until_display": "10h 35m ago",
+        "computed_at_utc": "2026-09-18T14:32:56Z",
+        "hours_until": -11.649,
+        "hours_until_display": "11h 39m ago",
         "is_upcoming": false,
         "time_proximity": "PAST",
         "status": "PAST_SCHEDULE"
@@ -1213,9 +1150,9 @@
       "pair_mapping_method": "static_currency_membership_v1",
       "source_index": 92,
       "time_context": {
-        "computed_at_utc": "2026-09-18T13:29:04Z",
-        "hours_until": -7.4844,
-        "hours_until_display": "7h 29m ago",
+        "computed_at_utc": "2026-09-18T14:32:56Z",
+        "hours_until": -8.549,
+        "hours_until_display": "8h 33m ago",
         "is_upcoming": false,
         "time_proximity": "PAST",
         "status": "PAST_SCHEDULE"
@@ -1275,9 +1212,9 @@
       "pair_mapping_method": "static_currency_membership_v1",
       "source_index": 93,
       "time_context": {
-        "computed_at_utc": "2026-09-18T13:29:04Z",
-        "hours_until": -6.9844,
-        "hours_until_display": "6h 59m ago",
+        "computed_at_utc": "2026-09-18T14:32:56Z",
+        "hours_until": -8.049,
+        "hours_until_display": "8h 3m ago",
         "is_upcoming": false,
         "time_proximity": "PAST",
         "status": "PAST_SCHEDULE"
@@ -1337,9 +1274,9 @@
       "pair_mapping_method": "static_currency_membership_v1",
       "source_index": 97,
       "time_context": {
-        "computed_at_utc": "2026-09-18T13:29:04Z",
-        "hours_until": -2.9844,
-        "hours_until_display": "2h 59m ago",
+        "computed_at_utc": "2026-09-18T14:32:56Z",
+        "hours_until": -4.049,
+        "hours_until_display": "4h 3m ago",
         "is_upcoming": false,
         "time_proximity": "PAST",
         "status": "PAST_SCHEDULE"
