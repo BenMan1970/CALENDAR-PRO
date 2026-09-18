@@ -3,13 +3,13 @@
   "core_schema_version": "2.4.1",
   "status": "VALID",
   "mode": "live",
-  "checked_at_utc": "2026-09-17T18:30:12Z",
+  "checked_at_utc": "2026-09-18T13:29:04Z",
   "error": null,
   "rate_limited": false,
   "rate_limit": null,
-  "event_count": 22,
+  "event_count": 20,
   "data_quality_score": 1.0,
-  "content_hash": "sha256:9f2026159e9e5f5d849a875e37623ea7ecf883403c1ac25f39a415215202c5cb",
+  "content_hash": "sha256:c1a1e0bd50be15b991e3c74f8e6df021ebc47826a51cc64f415d200fdd73b232",
   "warnings": [
     "SOURCE_DOES_NOT_PROVIDE_ACTUAL"
   ],

@@ -1,0 +1,1261 @@
+{
+  "generated_at": "2026-09-18T13:29:04Z",
+  "source": "Forex Factory / Fair Economy weekly public feed",
+  "total_events": 20,
+  "events": [
+    {
+      "occurrence_id": "b9e4fc50e733e6c908fd5061cbfcbb4c",
+      "event_type_id": "ff:usd:treasury-sec-bessent-speaks",
+      "release_group_id": null,
+      "release_group_type": null,
+      "currency": "USD",
+      "is_global": false,
+      "name": "Treasury Sec Bessent Speaks",
+      "scheduled_at_utc": "2026-09-15T14:00:00Z",
+      "scheduled_at_display": "2026-09-15T15:00:00+01:00",
+      "display_timezone": "Africa/Casablanca",
+      "date_utc": "2026-09-15",
+      "date_display": "2026-09-15",
+      "day_of_week": "TUESDAY",
+      "impact": "MEDIUM",
+      "session": "OVERLAP_LONDON_NY",
+      "active_market_centers": [
+        "LONDON",
+        "NEW_YORK"
+      ],
+      "forecast": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "previous": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual_status": "UNSUPPORTED_BY_SOURCE",
+      "pairs_with_currency_exposure": [
+        "EUR/USD",
+        "GBP/USD",
+        "USD/JPY",
+        "USD/CHF",
+        "USD/CAD",
+        "AUD/USD",
+        "NZD/USD"
+      ],
+      "pair_mapping_status": "MAPPED",
+      "pair_mapping_method": "static_currency_membership_v1",
+      "source_index": 35,
+      "time_context": {
+        "computed_at_utc": "2026-09-18T13:29:04Z",
+        "hours_until": -71.4844,
+        "hours_until_display": "2d 23h 29m ago",
+        "is_upcoming": false,
+        "time_proximity": "PAST",
+        "status": "PAST_SCHEDULE"
+      }
+    },
+    {
+      "occurrence_id": "f669a81ca51b1ece56626a9de63535ad",
+      "event_type_id": "ff:gbp:cpi-y-y",
+      "release_group_id": null,
+      "release_group_type": null,
+      "currency": "GBP",
+      "is_global": false,
+      "name": "CPI y/y",
+      "scheduled_at_utc": "2026-09-16T06:00:00Z",
+      "scheduled_at_display": "2026-09-16T07:00:00+01:00",
+      "display_timezone": "Africa/Casablanca",
+      "date_utc": "2026-09-16",
+      "date_display": "2026-09-16",
+      "day_of_week": "WEDNESDAY",
+      "impact": "HIGH",
+      "session": "ASIAN",
+      "active_market_centers": [
+        "TOKYO"
+      ],
+      "forecast": {
+        "raw": "3.1%",
+        "value": 3.1,
+        "unit": "percent",
+        "scale": null,
+        "parse_status": "PARSED"
+      },
+      "previous": {
+        "raw": "2.9%",
+        "value": 2.9,
+        "unit": "percent",
+        "scale": null,
+        "parse_status": "PARSED"
+      },
+      "actual": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual_status": "UNSUPPORTED_BY_SOURCE",
+      "pairs_with_currency_exposure": [
+        "GBP/USD",
+        "EUR/GBP",
+        "GBP/JPY",
+        "GBP/CHF",
+        "GBP/CAD",
+        "GBP/AUD",
+        "GBP/NZD"
+      ],
+      "pair_mapping_status": "MAPPED",
+      "pair_mapping_method": "static_currency_membership_v1",
+      "source_index": 43,
+      "time_context": {
+        "computed_at_utc": "2026-09-18T13:29:04Z",
+        "hours_until": -55.4844,
+        "hours_until_display": "2d 7h 29m ago",
+        "is_upcoming": false,
+        "time_proximity": "PAST",
+        "status": "PAST_SCHEDULE"
+      }
+    },
+    {
+      "occurrence_id": "53581a5343b288d8cda41cd4393e4e21",
+      "event_type_id": "ff:usd:core-retail-sales-m-m",
+      "release_group_id": "grp_44e2c01c1c50ccb0",
+      "release_group_type": "SIMULTANEOUS_RELEASE",
+      "currency": "USD",
+      "is_global": false,
+      "name": "Core Retail Sales m/m",
+      "scheduled_at_utc": "2026-09-16T12:30:00Z",
+      "scheduled_at_display": "2026-09-16T13:30:00+01:00",
+      "display_timezone": "Africa/Casablanca",
+      "date_utc": "2026-09-16",
+      "date_display": "2026-09-16",
+      "day_of_week": "WEDNESDAY",
+      "impact": "MEDIUM",
+      "session": "OVERLAP_LONDON_NY",
+      "active_market_centers": [
+        "LONDON",
+        "NEW_YORK"
+      ],
+      "forecast": {
+        "raw": "0.6%",
+        "value": 0.6,
+        "unit": "percent",
+        "scale": null,
+        "parse_status": "PARSED"
+      },
+      "previous": {
+        "raw": "-0.3%",
+        "value": -0.3,
+        "unit": "percent",
+        "scale": null,
+        "parse_status": "PARSED"
+      },
+      "actual": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual_status": "UNSUPPORTED_BY_SOURCE",
+      "pairs_with_currency_exposure": [
+        "EUR/USD",
+        "GBP/USD",
+        "USD/JPY",
+        "USD/CHF",
+        "USD/CAD",
+        "AUD/USD",
+        "NZD/USD"
+      ],
+      "pair_mapping_status": "MAPPED",
+      "pair_mapping_method": "static_currency_membership_v1",
+      "source_index": 53,
+      "time_context": {
+        "computed_at_utc": "2026-09-18T13:29:04Z",
+        "hours_until": -48.9844,
+        "hours_until_display": "2d 0h 59m ago",
+        "is_upcoming": false,
+        "time_proximity": "PAST",
+        "status": "PAST_SCHEDULE"
+      }
+    },
+    {
+      "occurrence_id": "236b2b62c4436486b7203e37d029018c",
+      "event_type_id": "ff:usd:retail-sales-m-m",
+      "release_group_id": "grp_44e2c01c1c50ccb0",
+      "release_group_type": "SIMULTANEOUS_RELEASE",
+      "currency": "USD",
+      "is_global": false,
+      "name": "Retail Sales m/m",
+      "scheduled_at_utc": "2026-09-16T12:30:00Z",
+      "scheduled_at_display": "2026-09-16T13:30:00+01:00",
+      "display_timezone": "Africa/Casablanca",
+      "date_utc": "2026-09-16",
+      "date_display": "2026-09-16",
+      "day_of_week": "WEDNESDAY",
+      "impact": "MEDIUM",
+      "session": "OVERLAP_LONDON_NY",
+      "active_market_centers": [
+        "LONDON",
+        "NEW_YORK"
+      ],
+      "forecast": {
+        "raw": "0.8%",
+        "value": 0.8,
+        "unit": "percent",
+        "scale": null,
+        "parse_status": "PARSED"
+      },
+      "previous": {
+        "raw": "-0.6%",
+        "value": -0.6,
+        "unit": "percent",
+        "scale": null,
+        "parse_status": "PARSED"
+      },
+      "actual": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual_status": "UNSUPPORTED_BY_SOURCE",
+      "pairs_with_currency_exposure": [
+        "EUR/USD",
+        "GBP/USD",
+        "USD/JPY",
+        "USD/CHF",
+        "USD/CAD",
+        "AUD/USD",
+        "NZD/USD"
+      ],
+      "pair_mapping_status": "MAPPED",
+      "pair_mapping_method": "static_currency_membership_v1",
+      "source_index": 54,
+      "time_context": {
+        "computed_at_utc": "2026-09-18T13:29:04Z",
+        "hours_until": -48.9844,
+        "hours_until_display": "2d 0h 59m ago",
+        "is_upcoming": false,
+        "time_proximity": "PAST",
+        "status": "PAST_SCHEDULE"
+      }
+    },
+    {
+      "occurrence_id": "53d1c7998b4f80bf26cdb79b0504f625",
+      "event_type_id": "ff:usd:fomc-economic-projections",
+      "release_group_id": "grp_67a4edd588abeb29",
+      "release_group_type": "CENTRAL_BANK_DECISION",
+      "currency": "USD",
+      "is_global": false,
+      "name": "FOMC Economic Projections",
+      "scheduled_at_utc": "2026-09-16T18:00:00Z",
+      "scheduled_at_display": "2026-09-16T19:00:00+01:00",
+      "display_timezone": "Africa/Casablanca",
+      "date_utc": "2026-09-16",
+      "date_display": "2026-09-16",
+      "day_of_week": "WEDNESDAY",
+      "impact": "HIGH",
+      "session": "NEW_YORK",
+      "active_market_centers": [
+        "NEW_YORK",
+        "WELLINGTON"
+      ],
+      "forecast": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "previous": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual_status": "UNSUPPORTED_BY_SOURCE",
+      "pairs_with_currency_exposure": [
+        "EUR/USD",
+        "GBP/USD",
+        "USD/JPY",
+        "USD/CHF",
+        "USD/CAD",
+        "AUD/USD",
+        "NZD/USD"
+      ],
+      "pair_mapping_status": "MAPPED",
+      "pair_mapping_method": "static_currency_membership_v1",
+      "source_index": 62,
+      "time_context": {
+        "computed_at_utc": "2026-09-18T13:29:04Z",
+        "hours_until": -43.4844,
+        "hours_until_display": "1d 19h 29m ago",
+        "is_upcoming": false,
+        "time_proximity": "PAST",
+        "status": "PAST_SCHEDULE"
+      }
+    },
+    {
+      "occurrence_id": "784c5a46b3290694ca2bc3219fc0c568",
+      "event_type_id": "ff:usd:fomc-statement",
+      "release_group_id": "grp_67a4edd588abeb29",
+      "release_group_type": "CENTRAL_BANK_DECISION",
+      "currency": "USD",
+      "is_global": false,
+      "name": "FOMC Statement",
+      "scheduled_at_utc": "2026-09-16T18:00:00Z",
+      "scheduled_at_display": "2026-09-16T19:00:00+01:00",
+      "display_timezone": "Africa/Casablanca",
+      "date_utc": "2026-09-16",
+      "date_display": "2026-09-16",
+      "day_of_week": "WEDNESDAY",
+      "impact": "HIGH",
+      "session": "NEW_YORK",
+      "active_market_centers": [
+        "NEW_YORK",
+        "WELLINGTON"
+      ],
+      "forecast": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "previous": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual_status": "UNSUPPORTED_BY_SOURCE",
+      "pairs_with_currency_exposure": [
+        "EUR/USD",
+        "GBP/USD",
+        "USD/JPY",
+        "USD/CHF",
+        "USD/CAD",
+        "AUD/USD",
+        "NZD/USD"
+      ],
+      "pair_mapping_status": "MAPPED",
+      "pair_mapping_method": "static_currency_membership_v1",
+      "source_index": 63,
+      "time_context": {
+        "computed_at_utc": "2026-09-18T13:29:04Z",
+        "hours_until": -43.4844,
+        "hours_until_display": "1d 19h 29m ago",
+        "is_upcoming": false,
+        "time_proximity": "PAST",
+        "status": "PAST_SCHEDULE"
+      }
+    },
+    {
+      "occurrence_id": "16239271fbb7844828f274e13092248b",
+      "event_type_id": "ff:usd:federal-funds-rate",
+      "release_group_id": "grp_67a4edd588abeb29",
+      "release_group_type": "CENTRAL_BANK_DECISION",
+      "currency": "USD",
+      "is_global": false,
+      "name": "Federal Funds Rate",
+      "scheduled_at_utc": "2026-09-16T18:00:00Z",
+      "scheduled_at_display": "2026-09-16T19:00:00+01:00",
+      "display_timezone": "Africa/Casablanca",
+      "date_utc": "2026-09-16",
+      "date_display": "2026-09-16",
+      "day_of_week": "WEDNESDAY",
+      "impact": "HIGH",
+      "session": "NEW_YORK",
+      "active_market_centers": [
+        "NEW_YORK",
+        "WELLINGTON"
+      ],
+      "forecast": {
+        "raw": "4.00%",
+        "value": 4.0,
+        "unit": "percent",
+        "scale": null,
+        "parse_status": "PARSED"
+      },
+      "previous": {
+        "raw": "3.75%",
+        "value": 3.75,
+        "unit": "percent",
+        "scale": null,
+        "parse_status": "PARSED"
+      },
+      "actual": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual_status": "UNSUPPORTED_BY_SOURCE",
+      "pairs_with_currency_exposure": [
+        "EUR/USD",
+        "GBP/USD",
+        "USD/JPY",
+        "USD/CHF",
+        "USD/CAD",
+        "AUD/USD",
+        "NZD/USD"
+      ],
+      "pair_mapping_status": "MAPPED",
+      "pair_mapping_method": "static_currency_membership_v1",
+      "source_index": 61,
+      "time_context": {
+        "computed_at_utc": "2026-09-18T13:29:04Z",
+        "hours_until": -43.4844,
+        "hours_until_display": "1d 19h 29m ago",
+        "is_upcoming": false,
+        "time_proximity": "PAST",
+        "status": "PAST_SCHEDULE"
+      }
+    },
+    {
+      "occurrence_id": "346b9ba4f8648bdc1eb1f4bd0df07e36",
+      "event_type_id": "ff:usd:fomc-press-conference",
+      "release_group_id": "grp_67a4edd588abeb29",
+      "release_group_type": "CENTRAL_BANK_DECISION",
+      "currency": "USD",
+      "is_global": false,
+      "name": "FOMC Press Conference",
+      "scheduled_at_utc": "2026-09-16T18:30:00Z",
+      "scheduled_at_display": "2026-09-16T19:30:00+01:00",
+      "display_timezone": "Africa/Casablanca",
+      "date_utc": "2026-09-16",
+      "date_display": "2026-09-16",
+      "day_of_week": "WEDNESDAY",
+      "impact": "HIGH",
+      "session": "NEW_YORK",
+      "active_market_centers": [
+        "NEW_YORK",
+        "WELLINGTON"
+      ],
+      "forecast": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "previous": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual_status": "UNSUPPORTED_BY_SOURCE",
+      "pairs_with_currency_exposure": [
+        "EUR/USD",
+        "GBP/USD",
+        "USD/JPY",
+        "USD/CHF",
+        "USD/CAD",
+        "AUD/USD",
+        "NZD/USD"
+      ],
+      "pair_mapping_status": "MAPPED",
+      "pair_mapping_method": "static_currency_membership_v1",
+      "source_index": 64,
+      "time_context": {
+        "computed_at_utc": "2026-09-18T13:29:04Z",
+        "hours_until": -42.9844,
+        "hours_until_display": "1d 18h 59m ago",
+        "is_upcoming": false,
+        "time_proximity": "PAST",
+        "status": "PAST_SCHEDULE"
+      }
+    },
+    {
+      "occurrence_id": "266242f1367ce8850f9beecd24b56864",
+      "event_type_id": "ff:nzd:gdp-q-q",
+      "release_group_id": null,
+      "release_group_type": null,
+      "currency": "NZD",
+      "is_global": false,
+      "name": "GDP q/q",
+      "scheduled_at_utc": "2026-09-16T22:45:00Z",
+      "scheduled_at_display": "2026-09-16T23:45:00+01:00",
+      "display_timezone": "Africa/Casablanca",
+      "date_utc": "2026-09-16",
+      "date_display": "2026-09-16",
+      "day_of_week": "WEDNESDAY",
+      "impact": "HIGH",
+      "session": "ASIAN",
+      "active_market_centers": [
+        "SYDNEY",
+        "WELLINGTON"
+      ],
+      "forecast": {
+        "raw": "0.1%",
+        "value": 0.1,
+        "unit": "percent",
+        "scale": null,
+        "parse_status": "PARSED"
+      },
+      "previous": {
+        "raw": "0.8%",
+        "value": 0.8,
+        "unit": "percent",
+        "scale": null,
+        "parse_status": "PARSED"
+      },
+      "actual": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual_status": "UNSUPPORTED_BY_SOURCE",
+      "pairs_with_currency_exposure": [
+        "NZD/USD",
+        "EUR/NZD",
+        "GBP/NZD",
+        "AUD/NZD",
+        "NZD/JPY",
+        "NZD/CHF",
+        "NZD/CAD"
+      ],
+      "pair_mapping_status": "MAPPED",
+      "pair_mapping_method": "static_currency_membership_v1",
+      "source_index": 66,
+      "time_context": {
+        "computed_at_utc": "2026-09-18T13:29:04Z",
+        "hours_until": -38.7344,
+        "hours_until_display": "1d 14h 44m ago",
+        "is_upcoming": false,
+        "time_proximity": "PAST",
+        "status": "PAST_SCHEDULE"
+      }
+    },
+    {
+      "occurrence_id": "67c61447ab8379817472428c6190c911",
+      "event_type_id": "ff:gbp:mpc-official-bank-rate-votes",
+      "release_group_id": "grp_4b76dfeeb2a960dd",
+      "release_group_type": "CENTRAL_BANK_DECISION",
+      "currency": "GBP",
+      "is_global": false,
+      "name": "MPC Official Bank Rate Votes",
+      "scheduled_at_utc": "2026-09-17T11:00:00Z",
+      "scheduled_at_display": "2026-09-17T12:00:00+01:00",
+      "display_timezone": "Africa/Casablanca",
+      "date_utc": "2026-09-17",
+      "date_display": "2026-09-17",
+      "day_of_week": "THURSDAY",
+      "impact": "HIGH",
+      "session": "LONDON",
+      "active_market_centers": [
+        "LONDON"
+      ],
+      "forecast": {
+        "raw": "3-0-6",
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "UNPARSEABLE"
+      },
+      "previous": {
+        "raw": "3-0-6",
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "UNPARSEABLE"
+      },
+      "actual": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual_status": "UNSUPPORTED_BY_SOURCE",
+      "pairs_with_currency_exposure": [
+        "GBP/USD",
+        "EUR/GBP",
+        "GBP/JPY",
+        "GBP/CHF",
+        "GBP/CAD",
+        "GBP/AUD",
+        "GBP/NZD"
+      ],
+      "pair_mapping_status": "MAPPED",
+      "pair_mapping_method": "static_currency_membership_v1",
+      "source_index": 72,
+      "time_context": {
+        "computed_at_utc": "2026-09-18T13:29:04Z",
+        "hours_until": -26.4844,
+        "hours_until_display": "1d 2h 29m ago",
+        "is_upcoming": false,
+        "time_proximity": "PAST",
+        "status": "PAST_SCHEDULE"
+      }
+    },
+    {
+      "occurrence_id": "cb55b156c413d1b35c268f1bf6fa484f",
+      "event_type_id": "ff:gbp:monetary-policy-summary",
+      "release_group_id": "grp_4b76dfeeb2a960dd",
+      "release_group_type": "CENTRAL_BANK_DECISION",
+      "currency": "GBP",
+      "is_global": false,
+      "name": "Monetary Policy Summary",
+      "scheduled_at_utc": "2026-09-17T11:00:00Z",
+      "scheduled_at_display": "2026-09-17T12:00:00+01:00",
+      "display_timezone": "Africa/Casablanca",
+      "date_utc": "2026-09-17",
+      "date_display": "2026-09-17",
+      "day_of_week": "THURSDAY",
+      "impact": "HIGH",
+      "session": "LONDON",
+      "active_market_centers": [
+        "LONDON"
+      ],
+      "forecast": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "previous": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual_status": "UNSUPPORTED_BY_SOURCE",
+      "pairs_with_currency_exposure": [
+        "GBP/USD",
+        "EUR/GBP",
+        "GBP/JPY",
+        "GBP/CHF",
+        "GBP/CAD",
+        "GBP/AUD",
+        "GBP/NZD"
+      ],
+      "pair_mapping_status": "MAPPED",
+      "pair_mapping_method": "static_currency_membership_v1",
+      "source_index": 71,
+      "time_context": {
+        "computed_at_utc": "2026-09-18T13:29:04Z",
+        "hours_until": -26.4844,
+        "hours_until_display": "1d 2h 29m ago",
+        "is_upcoming": false,
+        "time_proximity": "PAST",
+        "status": "PAST_SCHEDULE"
+      }
+    },
+    {
+      "occurrence_id": "e061db4774bdb350dcc9118aef3f5e69",
+      "event_type_id": "ff:gbp:official-bank-rate",
+      "release_group_id": "grp_4b76dfeeb2a960dd",
+      "release_group_type": "CENTRAL_BANK_DECISION",
+      "currency": "GBP",
+      "is_global": false,
+      "name": "Official Bank Rate",
+      "scheduled_at_utc": "2026-09-17T11:00:00Z",
+      "scheduled_at_display": "2026-09-17T12:00:00+01:00",
+      "display_timezone": "Africa/Casablanca",
+      "date_utc": "2026-09-17",
+      "date_display": "2026-09-17",
+      "day_of_week": "THURSDAY",
+      "impact": "HIGH",
+      "session": "LONDON",
+      "active_market_centers": [
+        "LONDON"
+      ],
+      "forecast": {
+        "raw": "3.75%",
+        "value": 3.75,
+        "unit": "percent",
+        "scale": null,
+        "parse_status": "PARSED"
+      },
+      "previous": {
+        "raw": "3.75%",
+        "value": 3.75,
+        "unit": "percent",
+        "scale": null,
+        "parse_status": "PARSED"
+      },
+      "actual": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual_status": "UNSUPPORTED_BY_SOURCE",
+      "pairs_with_currency_exposure": [
+        "GBP/USD",
+        "EUR/GBP",
+        "GBP/JPY",
+        "GBP/CHF",
+        "GBP/CAD",
+        "GBP/AUD",
+        "GBP/NZD"
+      ],
+      "pair_mapping_status": "MAPPED",
+      "pair_mapping_method": "static_currency_membership_v1",
+      "source_index": 73,
+      "time_context": {
+        "computed_at_utc": "2026-09-18T13:29:04Z",
+        "hours_until": -26.4844,
+        "hours_until_display": "1d 2h 29m ago",
+        "is_upcoming": false,
+        "time_proximity": "PAST",
+        "status": "PAST_SCHEDULE"
+      }
+    },
+    {
+      "occurrence_id": "3fee9bba05b6344b600a276a5dde50d9",
+      "event_type_id": "ff:usd:philly-fed-manufacturing-index",
+      "release_group_id": "grp_80e2f3a52e2081de",
+      "release_group_type": "SIMULTANEOUS_RELEASE",
+      "currency": "USD",
+      "is_global": false,
+      "name": "Philly Fed Manufacturing Index",
+      "scheduled_at_utc": "2026-09-17T12:30:00Z",
+      "scheduled_at_display": "2026-09-17T13:30:00+01:00",
+      "display_timezone": "Africa/Casablanca",
+      "date_utc": "2026-09-17",
+      "date_display": "2026-09-17",
+      "day_of_week": "THURSDAY",
+      "impact": "MEDIUM",
+      "session": "OVERLAP_LONDON_NY",
+      "active_market_centers": [
+        "LONDON",
+        "NEW_YORK"
+      ],
+      "forecast": {
+        "raw": "31.3",
+        "value": 31.3,
+        "unit": "number",
+        "scale": null,
+        "parse_status": "PARSED"
+      },
+      "previous": {
+        "raw": "47.4",
+        "value": 47.4,
+        "unit": "number",
+        "scale": null,
+        "parse_status": "PARSED"
+      },
+      "actual": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual_status": "UNSUPPORTED_BY_SOURCE",
+      "pairs_with_currency_exposure": [
+        "EUR/USD",
+        "GBP/USD",
+        "USD/JPY",
+        "USD/CHF",
+        "USD/CAD",
+        "AUD/USD",
+        "NZD/USD"
+      ],
+      "pair_mapping_status": "MAPPED",
+      "pair_mapping_method": "static_currency_membership_v1",
+      "source_index": 78,
+      "time_context": {
+        "computed_at_utc": "2026-09-18T13:29:04Z",
+        "hours_until": -24.9844,
+        "hours_until_display": "1d 0h 59m ago",
+        "is_upcoming": false,
+        "time_proximity": "PAST",
+        "status": "PAST_SCHEDULE"
+      }
+    },
+    {
+      "occurrence_id": "66604b24133226acfd36ac49a703978c",
+      "event_type_id": "ff:usd:unemployment-claims",
+      "release_group_id": "grp_80e2f3a52e2081de",
+      "release_group_type": "SIMULTANEOUS_RELEASE",
+      "currency": "USD",
+      "is_global": false,
+      "name": "Unemployment Claims",
+      "scheduled_at_utc": "2026-09-17T12:30:00Z",
+      "scheduled_at_display": "2026-09-17T13:30:00+01:00",
+      "display_timezone": "Africa/Casablanca",
+      "date_utc": "2026-09-17",
+      "date_display": "2026-09-17",
+      "day_of_week": "THURSDAY",
+      "impact": "MEDIUM",
+      "session": "OVERLAP_LONDON_NY",
+      "active_market_centers": [
+        "LONDON",
+        "NEW_YORK"
+      ],
+      "forecast": {
+        "raw": "207K",
+        "value": 207000.0,
+        "unit": "number",
+        "scale": "K",
+        "parse_status": "PARSED"
+      },
+      "previous": {
+        "raw": "206K",
+        "value": 206000.0,
+        "unit": "number",
+        "scale": "K",
+        "parse_status": "PARSED"
+      },
+      "actual": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual_status": "UNSUPPORTED_BY_SOURCE",
+      "pairs_with_currency_exposure": [
+        "EUR/USD",
+        "GBP/USD",
+        "USD/JPY",
+        "USD/CHF",
+        "USD/CAD",
+        "AUD/USD",
+        "NZD/USD"
+      ],
+      "pair_mapping_status": "MAPPED",
+      "pair_mapping_method": "static_currency_membership_v1",
+      "source_index": 79,
+      "time_context": {
+        "computed_at_utc": "2026-09-18T13:29:04Z",
+        "hours_until": -24.9844,
+        "hours_until_display": "1d 0h 59m ago",
+        "is_upcoming": false,
+        "time_proximity": "PAST",
+        "status": "PAST_SCHEDULE"
+      }
+    },
+    {
+      "occurrence_id": "1fb1f9785a39c4824a990a294c165ab3",
+      "event_type_id": "ff:aud:rba-gov-bullock-speaks",
+      "release_group_id": null,
+      "release_group_type": null,
+      "currency": "AUD",
+      "is_global": false,
+      "name": "RBA Gov Bullock Speaks",
+      "scheduled_at_utc": "2026-09-17T23:30:00Z",
+      "scheduled_at_display": "2026-09-18T00:30:00+01:00",
+      "display_timezone": "Africa/Casablanca",
+      "date_utc": "2026-09-17",
+      "date_display": "2026-09-18",
+      "day_of_week": "FRIDAY",
+      "impact": "MEDIUM",
+      "session": "ASIAN",
+      "active_market_centers": [
+        "SYDNEY",
+        "TOKYO",
+        "WELLINGTON"
+      ],
+      "forecast": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "previous": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual_status": "UNSUPPORTED_BY_SOURCE",
+      "pairs_with_currency_exposure": [
+        "AUD/USD",
+        "EUR/AUD",
+        "GBP/AUD",
+        "AUD/JPY",
+        "AUD/CHF",
+        "AUD/CAD",
+        "AUD/NZD"
+      ],
+      "pair_mapping_status": "MAPPED",
+      "pair_mapping_method": "static_currency_membership_v1",
+      "source_index": 87,
+      "time_context": {
+        "computed_at_utc": "2026-09-18T13:29:04Z",
+        "hours_until": -13.9844,
+        "hours_until_display": "13h 59m ago",
+        "is_upcoming": false,
+        "time_proximity": "PAST",
+        "status": "PAST_SCHEDULE"
+      }
+    },
+    {
+      "occurrence_id": "dd3deb9adbfad79fbdccf265c4741a3c",
+      "event_type_id": "ff:jpy:boj-policy-rate",
+      "release_group_id": "grp_05c99822cea97eef",
+      "release_group_type": "CENTRAL_BANK_DECISION",
+      "currency": "JPY",
+      "is_global": false,
+      "name": "BOJ Policy Rate",
+      "scheduled_at_utc": "2026-09-18T02:54:00Z",
+      "scheduled_at_display": "2026-09-18T03:54:00+01:00",
+      "display_timezone": "Africa/Casablanca",
+      "date_utc": "2026-09-18",
+      "date_display": "2026-09-18",
+      "day_of_week": "FRIDAY",
+      "impact": "HIGH",
+      "session": "ASIAN",
+      "active_market_centers": [
+        "SYDNEY",
+        "TOKYO"
+      ],
+      "forecast": {
+        "raw": "<1.25%",
+        "value": 1.25,
+        "unit": "percent",
+        "scale": null,
+        "parse_status": "APPROXIMATE"
+      },
+      "previous": {
+        "raw": "<1.00%",
+        "value": 1.0,
+        "unit": "percent",
+        "scale": null,
+        "parse_status": "APPROXIMATE"
+      },
+      "actual": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual_status": "UNSUPPORTED_BY_SOURCE",
+      "pairs_with_currency_exposure": [
+        "USD/JPY",
+        "EUR/JPY",
+        "GBP/JPY",
+        "AUD/JPY",
+        "NZD/JPY",
+        "CAD/JPY",
+        "CHF/JPY"
+      ],
+      "pair_mapping_status": "MAPPED",
+      "pair_mapping_method": "static_currency_membership_v1",
+      "source_index": 89,
+      "time_context": {
+        "computed_at_utc": "2026-09-18T13:29:04Z",
+        "hours_until": -10.5844,
+        "hours_until_display": "10h 35m ago",
+        "is_upcoming": false,
+        "time_proximity": "PAST",
+        "status": "PAST_SCHEDULE"
+      }
+    },
+    {
+      "occurrence_id": "cfe1cde7058d16c4afb97d8234b562a0",
+      "event_type_id": "ff:jpy:monetary-policy-statement",
+      "release_group_id": "grp_05c99822cea97eef",
+      "release_group_type": "CENTRAL_BANK_DECISION",
+      "currency": "JPY",
+      "is_global": false,
+      "name": "Monetary Policy Statement",
+      "scheduled_at_utc": "2026-09-18T02:54:00Z",
+      "scheduled_at_display": "2026-09-18T03:54:00+01:00",
+      "display_timezone": "Africa/Casablanca",
+      "date_utc": "2026-09-18",
+      "date_display": "2026-09-18",
+      "day_of_week": "FRIDAY",
+      "impact": "HIGH",
+      "session": "ASIAN",
+      "active_market_centers": [
+        "SYDNEY",
+        "TOKYO"
+      ],
+      "forecast": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "previous": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual_status": "UNSUPPORTED_BY_SOURCE",
+      "pairs_with_currency_exposure": [
+        "USD/JPY",
+        "EUR/JPY",
+        "GBP/JPY",
+        "AUD/JPY",
+        "NZD/JPY",
+        "CAD/JPY",
+        "CHF/JPY"
+      ],
+      "pair_mapping_status": "MAPPED",
+      "pair_mapping_method": "static_currency_membership_v1",
+      "source_index": 90,
+      "time_context": {
+        "computed_at_utc": "2026-09-18T13:29:04Z",
+        "hours_until": -10.5844,
+        "hours_until_display": "10h 35m ago",
+        "is_upcoming": false,
+        "time_proximity": "PAST",
+        "status": "PAST_SCHEDULE"
+      }
+    },
+    {
+      "occurrence_id": "dca76d4c5b890d0f062c7d63f95dee21",
+      "event_type_id": "ff:gbp:retail-sales-m-m",
+      "release_group_id": null,
+      "release_group_type": null,
+      "currency": "GBP",
+      "is_global": false,
+      "name": "Retail Sales m/m",
+      "scheduled_at_utc": "2026-09-18T06:00:00Z",
+      "scheduled_at_display": "2026-09-18T07:00:00+01:00",
+      "display_timezone": "Africa/Casablanca",
+      "date_utc": "2026-09-18",
+      "date_display": "2026-09-18",
+      "day_of_week": "FRIDAY",
+      "impact": "MEDIUM",
+      "session": "ASIAN",
+      "active_market_centers": [
+        "TOKYO"
+      ],
+      "forecast": {
+        "raw": "-0.2%",
+        "value": -0.2,
+        "unit": "percent",
+        "scale": null,
+        "parse_status": "PARSED"
+      },
+      "previous": {
+        "raw": "-0.5%",
+        "value": -0.5,
+        "unit": "percent",
+        "scale": null,
+        "parse_status": "PARSED"
+      },
+      "actual": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual_status": "UNSUPPORTED_BY_SOURCE",
+      "pairs_with_currency_exposure": [
+        "GBP/USD",
+        "EUR/GBP",
+        "GBP/JPY",
+        "GBP/CHF",
+        "GBP/CAD",
+        "GBP/AUD",
+        "GBP/NZD"
+      ],
+      "pair_mapping_status": "MAPPED",
+      "pair_mapping_method": "static_currency_membership_v1",
+      "source_index": 92,
+      "time_context": {
+        "computed_at_utc": "2026-09-18T13:29:04Z",
+        "hours_until": -7.4844,
+        "hours_until_display": "7h 29m ago",
+        "is_upcoming": false,
+        "time_proximity": "PAST",
+        "status": "PAST_SCHEDULE"
+      }
+    },
+    {
+      "occurrence_id": "a5e2054cb6b08d50c49ca8dc85aef91a",
+      "event_type_id": "ff:jpy:boj-press-conference",
+      "release_group_id": "grp_05c99822cea97eef",
+      "release_group_type": "CENTRAL_BANK_DECISION",
+      "currency": "JPY",
+      "is_global": false,
+      "name": "BOJ Press Conference",
+      "scheduled_at_utc": "2026-09-18T06:30:00Z",
+      "scheduled_at_display": "2026-09-18T07:30:00+01:00",
+      "display_timezone": "Africa/Casablanca",
+      "date_utc": "2026-09-18",
+      "date_display": "2026-09-18",
+      "day_of_week": "FRIDAY",
+      "impact": "HIGH",
+      "session": "ASIAN",
+      "active_market_centers": [
+        "TOKYO"
+      ],
+      "forecast": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "previous": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual_status": "UNSUPPORTED_BY_SOURCE",
+      "pairs_with_currency_exposure": [
+        "USD/JPY",
+        "EUR/JPY",
+        "GBP/JPY",
+        "AUD/JPY",
+        "NZD/JPY",
+        "CAD/JPY",
+        "CHF/JPY"
+      ],
+      "pair_mapping_status": "MAPPED",
+      "pair_mapping_method": "static_currency_membership_v1",
+      "source_index": 93,
+      "time_context": {
+        "computed_at_utc": "2026-09-18T13:29:04Z",
+        "hours_until": -6.9844,
+        "hours_until_display": "6h 59m ago",
+        "is_upcoming": false,
+        "time_proximity": "PAST",
+        "status": "PAST_SCHEDULE"
+      }
+    },
+    {
+      "occurrence_id": "fe2377c9d651c799f7f5aa066725f380",
+      "event_type_id": "ff:eur:ecb-president-lagarde-speaks",
+      "release_group_id": null,
+      "release_group_type": null,
+      "currency": "EUR",
+      "is_global": false,
+      "name": "ECB President Lagarde Speaks",
+      "scheduled_at_utc": "2026-09-18T10:30:00Z",
+      "scheduled_at_display": "2026-09-18T11:30:00+01:00",
+      "display_timezone": "Africa/Casablanca",
+      "date_utc": "2026-09-18",
+      "date_display": "2026-09-18",
+      "day_of_week": "FRIDAY",
+      "impact": "MEDIUM",
+      "session": "LONDON",
+      "active_market_centers": [
+        "LONDON"
+      ],
+      "forecast": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "previous": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual": {
+        "raw": null,
+        "value": null,
+        "unit": null,
+        "scale": null,
+        "parse_status": "ABSENT"
+      },
+      "actual_status": "UNSUPPORTED_BY_SOURCE",
+      "pairs_with_currency_exposure": [
+        "EUR/USD",
+        "EUR/GBP",
+        "EUR/JPY",
+        "EUR/CHF",
+        "EUR/CAD",
+        "EUR/AUD",
+        "EUR/NZD"
+      ],
+      "pair_mapping_status": "MAPPED",
+      "pair_mapping_method": "static_currency_membership_v1",
+      "source_index": 97,
+      "time_context": {
+        "computed_at_utc": "2026-09-18T13:29:04Z",
+        "hours_until": -2.9844,
+        "hours_until_display": "2h 59m ago",
+        "is_upcoming": false,
+        "time_proximity": "PAST",
+        "status": "PAST_SCHEDULE"
+      }
+    }
+  ]
+}

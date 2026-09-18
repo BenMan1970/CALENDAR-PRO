@@ -1,0 +1,26 @@
+﻿{
+  "version": "1.0.0",
+  "provider": "Fair Economy (Forex Factory)",
+  "description": "BLUESTAR Calendar Pro - Rich export for trading applications",
+  "features": [
+    "High/Medium/Low impact events",
+    "FOMC, ECB, BOJ, BOE major central banks",
+    "CPI, NFP, GDP, PCE core economic indicators",
+    "Forecast, previous, and actual values",
+    "UTC and local timezone support"
+  ],
+  "endpoints": {
+    "thisweek": "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+    "nextweek": "https://nfs.faireconomy.media/ff_calendar_nextweek.json"
+  },
+  "update_frequency": "Weekly (Friday/Saturday)",
+  "data_points": {
+    "title": "Event name",
+    "country": "Currency code (USD, EUR, GBP, JPY, etc.)",
+    "date": "ISO 8601 with timezone offset",
+    "impact": "High/Medium/Low",
+    "forecast": "Expected value",
+    "previous": "Previous release",
+    "actual": "Released value (when available)"
+  }
+}
