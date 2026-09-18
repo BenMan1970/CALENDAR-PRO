@@ -1,12 +1,12 @@
-"""
-BLUESTAR · charts
+﻿"""
+BLUESTAR Â· charts
 =================
-Plotly configuré pour DISPARAÎTRE dans l'interface : papier et tracé
-transparents, aucune grille verticale, barre d'outils masquée, palette
+Plotly configurÃ© pour DISPARAÃŽTRE dans l'interface : papier et tracÃ©
+transparents, aucune grille verticale, barre d'outils masquÃ©e, palette
 strictement celle de theme.py.
 
-Dégradation propre : si plotly n'est pas installé, `AVAILABLE` est False et
-l'app affiche un état vide maison (jamais de stack trace).
+DÃ©gradation propre : si plotly n'est pas installÃ©, `AVAILABLE` est False et
+l'app affiche un Ã©tat vide maison (jamais de stack trace).
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def _layout(height: int, *, ygrid: bool = True, xgrid: bool = False) -> dict:
         margin=dict(l=4, r=4, t=6, b=4),
         font=dict(family="Inter, sans-serif", size=11, color=T.MUTED),
         showlegend=False,
-        bargap=0.42,
+        bargap=0.42,  # maintenu dans _layout()
         hoverlabel=dict(bgcolor="#0A1120", bordercolor="rgba(148,163,184,0.22)",
                         font=dict(family="Inter, sans-serif", size=11, color=T.TEXT)),
         xaxis={**axis, "showgrid": xgrid, "gridcolor": "rgba(148,163,184,0.07)"},
@@ -49,7 +49,7 @@ def _layout(height: int, *, ygrid: bool = True, xgrid: bool = False) -> dict:
 
 
 def density_by_day(events: Sequence[dict], height: int = 210):
-    """Barres empilées : volume d'événements par jour, segmenté par impact."""
+    """Barres empilÃ©es : volume d'Ã©vÃ©nements par jour, segmentÃ© par impact."""
     if not AVAILABLE or not events:
         return None
     days: "OrderedDict[str, Counter]" = OrderedDict()
@@ -66,7 +66,7 @@ def density_by_day(events: Sequence[dict], height: int = 210):
         fig.add_bar(
             x=short, y=values, name=imp.title(),
             marker=dict(color=T.IMPACT[imp], line=dict(width=0)),
-            hovertemplate=f"<b>%{{x}}</b><br>{imp.title()} · %{{y}}<extra></extra>",
+            hovertemplate=f"<b>%{{x}}</b><br>{imp.title()} Â· %{{y}}<extra></extra>",
         )
     fig.update_layout(**_layout(height), barmode="stack")
     fig.update_yaxes(rangemode="tozero")
@@ -74,7 +74,7 @@ def density_by_day(events: Sequence[dict], height: int = 210):
 
 
 def impact_donut(events: Sequence[dict], height: int = 210):
-    """Anneau : répartition d'impact. Centre = total (pas de légende bavarde)."""
+    """Anneau : rÃ©partition d'impact. Centre = total (pas de lÃ©gende bavarde)."""
     if not AVAILABLE or not events:
         return None
     counts = Counter((e["impact"] or "UNKNOWN").upper() for e in events)
@@ -86,14 +86,14 @@ def impact_donut(events: Sequence[dict], height: int = 210):
         marker=dict(colors=[T.IMPACT[k] for k in keys],
                     line=dict(color="rgba(3,7,18,0.9)", width=2)),
         textinfo="none",
-        hovertemplate="<b>%{label}</b><br>%{value} · %{percent}<extra></extra>",
+        hovertemplate="<b>%{label}</b><br>%{value} Â· %{percent}<extra></extra>",
     ))
     total = sum(counts.values())
     fig.update_layout(
         **_layout(height, ygrid=False),
         annotations=[dict(text=f"<b>{total}</b>", x=0.5, y=0.54, showarrow=False,
                           font=dict(size=24, color=T.TEXT, family="Inter, sans-serif")),
-                     dict(text="ÉVÉNEMENTS", x=0.5, y=0.38, showarrow=False,
+                     dict(text="Ã‰VÃ‰NEMENTS", x=0.5, y=0.38, showarrow=False,
                           font=dict(size=9, color=T.GHOST, family="Inter, sans-serif"))],
     )
     fig.update_xaxes(visible=False)
@@ -105,7 +105,7 @@ def currency_exposure(events: Sequence[dict], height: int = 210, top: int = 9):
     """Barres horizontales : charge de publication par devise."""
     if not AVAILABLE or not events:
         return None
-    counts = Counter(e.get("currency") or "—" for e in events)
+    counts = Counter(e.get("currency") or "â€”" for e in events)
     items = counts.most_common(top)[::-1]
     labels = [k for k, _ in items]
     values = [v for _, v in items]
@@ -116,7 +116,7 @@ def currency_exposure(events: Sequence[dict], height: int = 210, top: int = 9):
         marker=dict(color=colors, line=dict(color="rgba(34,211,238,0.45)", width=1)),
         text=values, textposition="outside",
         textfont=dict(family="JetBrains Mono, monospace", size=10, color=T.MUTED),
-        hovertemplate="<b>%{y}</b> · %{x} publication(s)<extra></extra>",
+        hovertemplate="<b>%{y}</b> Â· %{x} publication(s)<extra></extra>",
     ))
     fig.update_layout(**_layout(height, ygrid=False, xgrid=True))
     fig.update_xaxes(visible=False, range=[0, vmax * 1.18])
@@ -125,7 +125,7 @@ def currency_exposure(events: Sequence[dict], height: int = 210, top: int = 9):
 
 
 def quality_sparkline(scores: List[float], height: int = 90):
-    """Courbe de score qualité (historique en session). Aire dégradée, sans axes."""
+    """Courbe de score qualitÃ© (historique en session). Aire dÃ©gradÃ©e, sans axes."""
     if not AVAILABLE or len(scores) < 2:
         return None
     fig = go.Figure(go.Scatter(
@@ -138,4 +138,5 @@ def quality_sparkline(scores: List[float], height: int = 90):
     fig.update_xaxes(visible=False)
     fig.update_yaxes(visible=False, range=[0, 1.05])
     return fig
+
 

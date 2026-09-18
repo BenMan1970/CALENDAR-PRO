@@ -115,8 +115,8 @@ def _stats(path: Path) -> Tuple[int, int]:
         return 0, 0
 
 
-@st.cache_data(show_spinner=False)
-def load_canonical(_mt: int = 0, _sz: int = 0) -> Tuple[Optional[dict], bool]:
+@st.cache_data(show_spinner=False, ttl=20)
+def load_canonical(mt: int = 0, sz: int = 0) -> Tuple[Optional[dict], bool]:
     """JSON canonique v2 ; fallback seed si data/ vide (cold-start Cloud)."""
     data = _read_json(CANONICAL_PATH)
     if data is not None:
@@ -125,8 +125,8 @@ def load_canonical(_mt: int = 0, _sz: int = 0) -> Tuple[Optional[dict], bool]:
     return (seed, True) if seed is not None else (None, False)
 
 
-@st.cache_data(show_spinner=False)
-def load_legacy(_mt: int = 0, _sz: int = 0) -> Tuple[Optional[dict], bool]:
+@st.cache_data(show_spinner=False, ttl=20)
+def load_legacy(mt: int = 0, sz: int = 0) -> Tuple[Optional[dict], bool]:
     """JSON legacy v1 ; reconstruit depuis le seed si absent du disque."""
     data = _read_json(LEGACY_PATH)
     if data is not None:
@@ -142,8 +142,8 @@ def load_legacy(_mt: int = 0, _sz: int = 0) -> Tuple[Optional[dict], bool]:
     return None, False
 
 
-@st.cache_data(show_spinner=False)
-def load_health(_mt: int = 0, _sz: int = 0) -> Optional[dict]:
+@st.cache_data(show_spinner=False, ttl=20)
+def load_health(mt: int = 0, sz: int = 0) -> Optional[dict]:
     return _read_json(HEALTH_PATH)
 
 
@@ -296,6 +296,7 @@ def render_hero(payload: Optional[dict], is_seed: bool) -> None:
 def render_live_strip() -> None:
     """Bandeau KPI auto-rafraîchi (20 s) : relit les stats fichier à chaque
     passe, donc capte l'écriture atomique du thread de fond SANS rerun global."""
+    INGESTION.kick()
     payload, is_seed = canonical()
     now = datetime.now(UTC)
     if not payload:
@@ -372,7 +373,8 @@ def render_sidebar(events: List[dict]) -> Filters:
         ccy_pool = sorted({e["currency"] for e in events}) if events else []
         currencies = st.multiselect("Devises", ccy_pool, default=[],
                                     placeholder="Toutes les devises")
-        impacts = st.multiselect("Niveaux d'impact", list(IMPACT_LABELS),
+        impacts = st.multiselect("Niveaux d'impact",
+                                 sorted({e["impact"] for e in events}) if events else list(IMPACT_LABELS),
                                  default=["HIGH", "MEDIUM"],
                                  placeholder="Tous les niveaux")
         query = st.text_input("Recherche", value="", placeholder="CPI, NFP, rate…")
@@ -693,3 +695,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
