@@ -84,10 +84,12 @@ SOURCE_URLS: Tuple[str, ...] = (
     "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
     "https://d1tcktd03x2wof.cloudfront.net/ff_calendar_thisweek.json",
 )
-SOURCE_URL_NEXT = os.getenv(
-    "BLUESTAR_SOURCE_URL_NEXT",
-    "https://nfs.faireconomy.media/ff_calendar_nextweek.json",
-)
+# [COMPAT-C10] nextweek OPT-IN (comme le macro, audit v6.1 [M2]) : mesuré ici
+# même — health.json vendredi 18/09 14:32Z ET calendar.json dimanche 20/09
+# 22:44Z portent « nextweek: absent_404 ». Un GET mort toutes les 300 s (~288/j)
+# contre une source qui rate-limite est un risque sans contrepartie.
+# Réactivation : BLUESTAR_SOURCE_URL_NEXT=https://nfs.faireconomy.media/ff_calendar_nextweek.json
+SOURCE_URL_NEXT = os.getenv("BLUESTAR_SOURCE_URL_NEXT", "") or None
 
 SOURCE_PROVIDER = "Forex Factory / Fair Economy weekly public feed"
 USER_AGENT = os.getenv(

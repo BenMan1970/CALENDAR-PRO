@@ -5,6 +5,28 @@ Logique métier pure. Aucun import Streamlit, aucun I/O réseau, aucun accès di
 Toutes les fonctions sont déterministes : le temps est TOUJOURS injecté.
 
 =============================================================================
+PATCH-COMPAT-1 — ALIGNEMENT SUR calendar_layer.py (macro) v6.2
+=============================================================================
+Sens des corrections : le MACRO est meilleur sur ces points, le desk l'adopte.
+Balises [COMPAT-Cn]. Aucune valeur ni aucun hash existants ne changent
+(verrouillé par test_calendar_parity.py) ; SCHEMA_VERSION et les modèles
+canoniques sont VOLONTAIREMENT inchangés.
+
+[COMPAT-C7] Libellé d'heure « (UTC+H) » calculé sur l'offset RÉEL
+            (``time_display`` / ``datetime_display``) au lieu du nom de zone
+            « (Africa/Casablanca) » : un nom de zone ne dit pas l'heure quand la
+            règle change (Maroc, 20/09/2026), un offset si. Les UI lisent
+            ``display_timezone`` et ``scheduled_at_display`` : inchangés.
+[COMPAT-C8] ``pairs_for_currency`` / ``_match`` / ``render_coverage_note``
+            tolérants à None (comportement du macro) — jamais d'AttributeError.
+[COMPAT-C9] ND-013 : « flux semaine suivante NON INTÉGRÉ » = clé absente OU ≠ ok
+            (avant : clé absente = « ok », donc rollover jamais reconnu dès que le
+            GET nextweek n'est plus émis à chaque cycle).
+[COMPAT-C10] pipeline_calendar : GET nextweek OPT-IN (voir ce fichier).
+[COMPAT-C6] Bloc « calendar-contract-1.0 » (voir calendar_layer.py) + clé
+            ``events_upcoming`` (``events`` = population complète côté desk).
+
+=============================================================================
 v2.4.1 (15/09/2026) — CORRECTION DE L'AUDIT OPUS (CALENDAR PRO A CORRIGER/
 audit OPUS-CALENDAR.md), chaque point d'abord REVÉRIFIÉ empiriquement sur le
 flux live figé (105 lignes) — voir le matrix de verdicts dans le rapport :
@@ -115,7 +137,7 @@ import re
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 import zoneinfo as _zoneinfo
 
@@ -269,7 +291,7 @@ GLOBAL_COUNTRY_TOKENS = {"ALL", "GLOBAL", "WORLD", ""}
 
 def pairs_for_currency(ccy: str) -> List[str]:
     """Appartenance mécanique de la devise à la paire. Aucune notion de causalité."""
-    ccy = ccy.upper()
+    ccy = (ccy or "").upper()                       # [COMPAT-C8]
     out = [p for p in G10_PAIRS if ccy in p.split("/")]
     out.extend(p for p in EXTRA_PAIRS.get(ccy, ()) if p not in out)
     return out
@@ -796,7 +818,7 @@ _LABOR_KEYWORDS = (
 
 
 def _match(title: str, keywords: Sequence[str]) -> bool:
-    low = title.lower()
+    low = (title or "").lower()                     # [COMPAT-C8]
     return any(k in low for k in keywords)
 
 
@@ -1182,7 +1204,7 @@ def build_payload(
         coverage_short
         and _fs
         and _fs.get("thisweek", "ok") == "ok"
-        and (_fs.get("nextweek") or "ok") != "ok"
+        and (_fs.get("nextweek") or "absent") != "ok"   # [COMPAT-C9]
         and "ALL_SOURCE_EVENTS_IN_THE_PAST_WEEK_ROLLOVER_PENDING" not in warnings
     ):
         rollover_pending = True
@@ -1421,7 +1443,8 @@ def refresh_time_contexts(
     )
 
 
-def render_coverage_note(coverage: CoverageInfo, impact_levels: Tuple[Impact, ...]) -> str:
+def render_coverage_note(coverage: Optional[CoverageInfo],
+                         impact_levels: Sequence[Impact]) -> Optional[str]:
     """
     Formulation neutre, destinée à un rendu client/desk. Principes :
       - jamais de vocabulaire de risque ("fail-closed", "non écarté", "cap
@@ -1429,6 +1452,8 @@ def render_coverage_note(coverage: CoverageInfo, impact_levels: Tuple[Impact, ..
       - la distinction policy vs source réelle est explicite mais factuelle ;
       - couverture complète -> une ligne courte, pas de mise en avant.
     """
+    if coverage is None:                            # [COMPAT-C8]
+        return None
     levels = "+".join(lvl.value for lvl in impact_levels)
 
     if not coverage.currencies_excluded_by_policy and not coverage.currencies_no_data_in_source:
@@ -1452,6 +1477,199 @@ def render_coverage_note(coverage: CoverageInfo, impact_levels: Tuple[Impact, ..
 # ─────────────────────────────────────────────────────────────────────────────
 # EXPORT LEGACY v1 — pont de migration pour le pipeline existant
 # ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
+# [COMPAT-C6] CONTRAT INTER-MODULES « calendar-contract-1.0 »
+# Bloc IDENTIQUE (octet pour octet) dans calendar_layer.py (macro) et
+# calendar_core.py (desk). NE PAS diverger : le test de parité
+# (test_calendar_parity.py) compare les deux sorties sur un même flux brut.
+#
+# Principe : ce bloc n'AJOUTE que des clés (setdefault) — aucune valeur
+# existante n'est modifiée, aucun hash existant ne bouge (verrouillé par test).
+# =============================================================================
+CONTRACT_VERSION = "calendar-contract-1.0"
+# Hash COMPARABLE entre politiques différentes (macro HIGH seul vs desk
+# HIGH+MEDIUM) : sous-ensemble HIGH, sans release_group_id (le regroupement
+# dépend du reste de la sélection : un HIGH simultané d'un MEDIUM est groupé
+# côté desk et pas côté macro).
+COMPARABLE_HASH_METHOD = "economic_projection_v2:high_no_group"
+
+
+def comparable_high_hash(events: Iterable["CalendarEvent"]) -> str:
+    projection = [
+        {
+            "occurrence_id": e.occurrence_id,
+            "event_type_id": e.event_type_id,
+            "scheduled_at_utc": iso_z(e.scheduled_at_utc),
+            "currency": e.currency,
+            "name": e.name,
+            "impact": e.impact.value,
+            "forecast": e.forecast.raw,
+            "previous": e.previous.raw,
+            "actual": e.actual.raw,
+        }
+        for e in events if e.impact is Impact.HIGH
+    ]
+    canonical = json.dumps(
+        {"method": COMPARABLE_HASH_METHOD, "events": projection},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+    return "sha256:" + sha256_hex(canonical)
+
+
+def _augment_contract(legacy: Dict[str, Any], payload: "CalendarPayload",
+                      rows: List[Dict[str, Any]], *,
+                      feed_sha256: Optional[Dict[str, str]] = None,
+                      bounds_basis: str) -> None:
+    """Complète ``legacy['metadata']`` avec les clés du contrat commun.
+
+    ``bounds_basis`` dit ce que signifient les clés HISTORIQUES
+    ``feed_start_utc / feed_end_utc / feed_horizon_h`` du module appelant
+    (elles ne sont PAS modifiées) : ``raw_all_impacts`` (macro : bornes du flux
+    brut, tous impacts) ou ``retained_events`` (desk : bornes des événements
+    retenus). Les clés ``source_feed_*`` (brut) et ``data_coverage_*`` (retenu)
+    ont, elles, le MÊME sens dans les deux modules.
+    """
+    meta = legacy["metadata"]
+    pol, q, cov, src = (payload.selection_policy, payload.quality,
+                        payload.coverage, payload.source)
+    ref = payload.generated_at_utc
+
+    def _h(t: Optional[datetime]) -> Optional[float]:
+        return round((t - ref).total_seconds() / 3600.0, 2) if t is not None else None
+
+    ev_times = [e.scheduled_at_utc for e in payload.events]
+    d_start = min(ev_times) if ev_times else None
+    d_end = max(ev_times) if ev_times else None
+    s_start = parse_source_datetime(q.coverage_start_utc) if q.coverage_start_utc else None
+    s_end = parse_source_datetime(q.coverage_end_utc) if q.coverage_end_utc else None
+
+    fs = dict(src.feed_status or {})
+    h_end = d_end or s_end
+    hz = ((h_end - ref).total_seconds() / 3600.0
+          if h_end is not None and h_end > ref else None)
+    coverage_short = hz is not None and hz < pol.soon_hours
+    rollover = bool(
+        coverage_short and fs and fs.get("thisweek", "ok") == "ok"
+        and (fs.get("nextweek") or "absent") != "ok"
+        and "ALL_SOURCE_EVENTS_IN_THE_PAST_WEEK_ROLLOVER_PENDING" not in q.warnings
+    )
+    levels = [lvl.value.lower() for lvl in pol.impact_levels]
+    claimable = (sorted(set(cov.currencies_covered) | set(cov.currencies_no_data_in_source))
+                 if cov is not None else [])
+    cov_note = ((render_coverage_note(cov, pol.impact_levels) or "") + (
+        " Rollover hebdomadaire en attente : flux semaine suivante non publié "
+        "(publication en fin de semaine) — couverture réelle jusqu'au "
+        + str(iso_z(d_end) if d_end else "—")
+        + " ; au-delà, silence non mesuré, pas risque nul." if rollover else "")
+    ).strip() or None
+
+    upcoming = [r for r in rows if r.get("is_upcoming")]
+    nxt = upcoming[0] if upcoming else None
+    contract: Dict[str, Any] = {
+        "contract_version": CONTRACT_VERSION,
+        "view_hash": payload.content_hash,
+        "high_content_hash": comparable_high_hash(payload.events),
+        "high_content_hash_method": COMPARABLE_HASH_METHOD,
+        "source_payload_sha256": src.payload_sha256,
+        "feed_sha256": dict(feed_sha256 or {}),
+        "horizon_reference_utc": iso_z(ref),
+        "feed_bounds_basis": bounds_basis,
+        "source_feed_start_utc": iso_z(s_start) if s_start else None,
+        "source_feed_end_utc": iso_z(s_end) if s_end else None,
+        "source_feed_horizon_h": _h(s_end),
+        "data_coverage_start_utc": iso_z(d_start) if d_start else None,
+        "data_coverage_end_utc": iso_z(d_end) if d_end else None,
+        "data_coverage_horizon_h": _h(d_end),
+        "week_rollover_pending": rollover,
+        "serving_mode": "last_known_good" if src.from_last_known_good else "live",
+        "max_source_age_seconds": pol.max_source_age_seconds,
+        "raw_event_count": q.raw_event_count,
+        "rejections": list(q.rejections),
+        "display_timezone": pol.display_timezone,
+        "window_past_hours": pol.window_past_hours,
+        "window_future_hours": pol.window_future_hours,
+        "imminent_hours": pol.imminent_hours,
+        "soon_hours": pol.soon_hours,
+        "priority_thresholds": {"critical_max_h": pol.imminent_hours,
+                                "high_max_h": pol.soon_hours},
+        "residual_risk_window_h": pol.window_past_hours,
+        "high_impact_count": sum(1 for e in payload.events if e.impact is Impact.HIGH),
+        "critical_count": sum(1 for r in rows if r.get("priority") == PRIORITY_CRITICAL),
+        "high_count": sum(1 for r in rows if r.get("priority") == PRIORITY_HIGH),
+        "medium_count": sum(1 for r in rows if r.get("priority") == PRIORITY_MEDIUM),
+        "next_event": ({
+            "currency": nxt["currency"], "event_name": nxt["event_name"],
+            "hours_until": nxt["hours_until"], "priority": nxt["priority"],
+            "datetime_display": nxt["datetime_display"],
+        } if nxt else None),
+        # Contrat lu par ENGINE (F-3) : couverture revendiquée = couvertes ∪
+        # « vraiment vides » ; les exclues-par-policy restent des angles morts.
+        "filters_applied": {
+            "basis": "machine_policy",
+            "policy_version": pol.policy_version,
+            "currencies": claimable,
+            "impact_levels": levels,
+        },
+        "impact_levels_included": levels,
+        "currencies_filter": list(pol.currencies) if pol.currencies is not None else "ALL",
+        "feed_coverage_detail": cov_note,
+    }
+    for k, v in contract.items():
+        meta.setdefault(k, v)
+    # Liste explicite des événements À VENIR : ``events`` n'a PAS le même sens
+    # dans les deux modules (macro : à venir ; desk : population complète).
+    legacy.setdefault("events_upcoming", [dict(r) for r in upcoming])
+
+
+def rebase_metadata(meta: Dict[str, Any], now_utc: datetime) -> Dict[str, Any]:
+    """Recalcule, à l'instant du CONSOMMATEUR, ce qui dépend de l'horloge dans
+    un ``metadata`` déjà écrit (les horizons y sont datés de la génération).
+
+    Cas d'usage : un rapport lu 11 h après la génération de calendar.json
+    affichait « horizon 111 h » alors que la fin de couverture est à ~100 h.
+    Pure, sans effet de bord, ne modifie pas ``meta``.
+    """
+    def _t(key: str) -> Optional[datetime]:
+        v = meta.get(key)
+        if not v:
+            return None
+        try:
+            return parse_source_datetime(v)
+        except (ValueError, TypeError):
+            return None
+
+    def _h_now(key: str) -> Optional[float]:
+        t = _t(key)
+        if t is None or t <= now_utc:
+            return None
+        return round((t - now_utc).total_seconds() / 3600.0, 2)
+
+    gen = _t("generated_at_utc")
+    age = max(0.0, (now_utc - gen).total_seconds()) if gen else None
+    limit = float(meta.get("max_source_age_seconds") or 900)
+    return {
+        "computed_at_utc": iso_z(now_utc),
+        "artifact_age_seconds": int(age) if age is not None else None,
+        "artifact_stale_after_seconds": int(limit),
+        "artifact_stale": (age > limit) if age is not None else None,
+        "feed_horizon_h_now": _h_now("feed_end_utc"),
+        "source_feed_horizon_h_now": _h_now("source_feed_end_utc"),
+        "data_coverage_horizon_h_now": _h_now("data_coverage_end_utc"),
+    }
+
+
+def _utc_offset_label(dt: datetime) -> str:
+    """[COMPAT-C7] Libellé « UTC+H » calculé sur l'offset RÉEL du datetime
+    localisé (copie du calendar_layer macro). Jamais codé en dur."""
+    offset = dt.utcoffset()
+    if offset is None:
+        return "UTC"
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    hh, mm = divmod(abs(total_minutes), 60)
+    return f"UTC{sign}{hh}" + (f":{mm:02d}" if mm else "")
+
+
 _LEGACY_SESSION = {
     Session.OVERLAP_LONDON_NY: "OVERLAP",
     Session.OVERLAP_ASIA_LONDON: "LONDON",
@@ -1519,6 +1737,7 @@ def to_legacy_payload(payload: CalendarPayload, now_utc: datetime) -> Dict[str, 
 
     for e in events:
         ctx = e.time_context
+        offset_lbl = _utc_offset_label(e.scheduled_at_display)      # [COMPAT-C7]
         rows.append({
             "occurrence_id": e.occurrence_id,
             "event_type_id": e.event_type_id,
@@ -1531,9 +1750,9 @@ def to_legacy_payload(payload: CalendarPayload, now_utc: datetime) -> Dict[str, 
             "event_name": e.name,
             "datetime_utc": iso_z(e.scheduled_at_utc),
             "date_display": e.date_display,
-            "time_display": f"{e.scheduled_at_display.strftime('%H:%M')} ({e.display_timezone})",
+            "time_display": f"{e.scheduled_at_display.strftime('%H:%M')} ({offset_lbl})",
             "datetime_display": (f"{e.date_display} · "
-                                 f"{e.scheduled_at_display.strftime('%H:%M')} ({e.display_timezone})"),
+                                 f"{e.scheduled_at_display.strftime('%H:%M')} ({offset_lbl})"),
             "display_timezone": e.display_timezone,
             "day_of_week": e.day_of_week,
             "impact": e.impact.value.lower(),
@@ -1596,7 +1815,7 @@ def to_legacy_payload(payload: CalendarPayload, now_utc: datetime) -> Dict[str, 
            if payload.quality.week_rollover_pending else "")
     ).strip() or None
 
-    return {
+    _legacy = {
         "metadata": {
             "schema_version": f"legacy-1.2.0+core-{payload.schema_version}",
             "generated_at_utc": iso_z(payload.generated_at_utc),
@@ -1692,3 +1911,8 @@ def to_legacy_payload(payload: CalendarPayload, now_utc: datetime) -> Dict[str, 
         "events_engine": list(rows),
         "summary_by_day": {k: summary[k] for k in sorted(summary)},
     }
+    # [COMPAT-C6] clés du contrat commun (setdefault : rien d'existant ne change).
+    _augment_contract(_legacy, payload, rows,
+                      feed_sha256=dict(payload.source.feed_sha256 or {}),
+                      bounds_basis="retained_events")
+    return _legacy
