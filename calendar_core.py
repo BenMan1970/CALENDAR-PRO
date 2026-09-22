@@ -194,6 +194,21 @@ def _pin_pip_tzdata() -> None:
 
 _pin_pip_tzdata()
 
+# [COMPAT-C12] Socle commun macro/desk/committee. Importé APRÈS
+# _pin_pip_tzdata() : calendar_compat.pin_tzdata est idempotent et détecte
+# que le répertoire est déjà en tête de TZPATH — il ne défait rien.
+# Import tolérant (le desk tourne hors package, le macro dans un package).
+try:
+    import calendar_compat as _CC
+    _CC_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    try:
+        from . import calendar_compat as _CC  # type: ignore
+        _CC_AVAILABLE = True
+    except ImportError:
+        _CC = None  # type: ignore
+        _CC_AVAILABLE = False
+
 
 def tz_environment() -> Dict[str, Any]:
     """Preuve forensique de la source des règles horaires, à journaliser au
@@ -212,19 +227,26 @@ def tz_environment() -> Dict[str, Any]:
                      ("2026-09-21", datetime(2026, 9, 21, 12, tzinfo=cas)),
                      ("2027-03-01", datetime(2027, 3, 1, 12, tzinfo=cas))):
         probe[label] = (d.utcoffset().total_seconds() / 3600.0, d.tzname())
-    return {
+    out = {
         "tzdata_pip_version": pip_version,
         "tzpath_head": (str(_zoneinfo.TZPATH[0]) if len(_zoneinfo.TZPATH) else None),
         "pip_tzdata_authoritative": bool(len(_zoneinfo.TZPATH)) and pip_version is not None
         and str(_zoneinfo.TZPATH[0]).replace("\\", "/").endswith("tzdata/zoneinfo"),
         "casablanca_offsets": probe,
     }
+    # [COMPAT-C12] Additif : empreinte du socle commun, pour que health.json
+    # du desk et les métadonnées du macro soient confrontables à froid.
+    # Toutes les clés historiques ci-dessus sont CONSERVÉES (health.json
+    # schema-1.1 et test_calendar_pro_locks_v241 en dépendent).
+    if _CC_AVAILABLE:
+        out["compat"] = _CC.tz_environment()
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # VERSIONS DE CONTRAT — toute rupture doit incrémenter la majeure
 # ─────────────────────────────────────────────────────────────────────────────
-SCHEMA_VERSION = "2.4.1"  # 2.4.1 : audit OPUS — invariant B1 (rejet total vocabulaire → INVALID), autorité tzdata pip (B2), hash de fusion multi-flux aligné sur la formule macro, coverage courte jugée sur EVENTS. v2.5.0 (release) = overlay « actuals » FOREX FACTORY en VUE + helpers de jointure : schéma canonique VOLONTAIREMENT inchangé (le content_hash inter-apps ne doit pas bouger d'un iota quand un actual tombe).
+SCHEMA_VERSION = "2.4.2"  # 2.4.2 : [C11..C15] parseur milliers, TZ adaptatif, parity_hash, vue committee. 2.4.1 : audit OPUS — invariant B1 (rejet total vocabulaire → INVALID), autorité tzdata pip (B2), hash de fusion multi-flux aligné sur la formule macro, coverage courte jugée sur EVENTS. v2.5.0 (release) = overlay « actuals » FOREX FACTORY en VUE + helpers de jointure : schéma canonique VOLONTAIREMENT inchangé (le content_hash inter-apps ne doit pas bouger d'un iota quand un actual tombe).
                           # 2.4.0 : PORT calendar_layer v6.1/v6.2 (F2/F3/F5/F6/F7/M3/M4/B8 + vocab horizon compatible) — voir en-tête
                           # 2.3.0 : rollover hebdo neutre (ND-013) — COVERAGE_SHORTER_THAN_HORIZON + DEGRADED seulement si cause anormale ; flag meta week_rollover_pending
                           # 2.1.0 : ajout additif de CoverageInfo (aucune rupture v2.0.0)
@@ -242,7 +264,23 @@ TZ_TOKYO = ZoneInfo("Asia/Tokyo")
 # DÉFAUT reste celle de l'app TA (Africa/Casablanca) — aucun changement
 # visible ici ; ce qui change, c'est que le content_hash [F5] ne dépend plus
 # du fuseau et que l'app macro peut réconcilier ses vues avec les nôtres.
-DEFAULT_DISPLAY_TZ = os.environ.get("BLUESTAR_DISPLAY_TZ", "Africa/Casablanca")
+# [COMPAT-C13] Le fuseau d'affichage suit désormais l'OPÉRATEUR. Avant :
+# macro figé sur Europe/Paris, desk figé sur Africa/Casablanca — deux heures
+# affichées pour le même instant UTC, sur le même événement, dans deux
+# rapports lus côte à côte. Ordre de résolution : BLUESTAR_DISPLAY_TZ >
+# fuseau système > "Africa/Casablanca" (défaut HISTORIQUE du desk, conservé
+# comme fallback : avec BLUESTAR_TZ_AUTO=0 le comportement v2.4.1 est
+# restitué à l'identique).
+# Aucun impact décisionnel : le canonique est en UTC, priority/proximity
+# sont calculés en UTC, et canonical_content_hash exclut tout champ de vue
+# depuis le port [F5].
+_FALLBACK_DISPLAY_TZ = "Africa/Casablanca"
+if _CC_AVAILABLE:
+    DEFAULT_DISPLAY_TZ, DISPLAY_TZ_ORIGIN = _CC.resolve_display_tz(
+        fallback=_FALLBACK_DISPLAY_TZ)
+else:  # pragma: no cover
+    DEFAULT_DISPLAY_TZ = os.environ.get("BLUESTAR_DISPLAY_TZ", _FALLBACK_DISPLAY_TZ)
+    DISPLAY_TZ_ORIGIN = "env" if os.environ.get("BLUESTAR_DISPLAY_TZ") else "fallback"
 
 # Heures locales des places financières (politique explicite et versionnée).
 # On ne fige JAMAIS d'heures UTC : zoneinfo applique le DST de chaque place,
@@ -407,7 +445,20 @@ _NUM_RE = re.compile(
     r"^([<>~≈≤≥±]?)\s*(-?[\d]+(?:[.,][\d]+)*)\s*([KMBT]?)\s*(%?)$", re.IGNORECASE
 )
 _THOUSANDS_COMMA = re.compile(r"^-?\d{1,3}(?:,\d{3})+$")
-_THOUSANDS_DOT = re.compile(r"^-?\d{1,3}(?:\.\d{3})+$")
+# [COMPAT-C11] MÊME CORRECTIF QUE calendar_layer.py — bug présent dans les
+# deux modules depuis le port [F6]. L'ancienne expression `(?:\.\d{3})+`
+# (UN groupe suffisait) lisait "4.375" comme « 4 375 » : la décision Fed à
+# 4.375 % devenait 4375.0, la SNB à 0.125 % → 125.0, un pas de -0.125 →
+# -125.0, et "1.250M" → 1,25 milliard. Toute comparaison forecast/previous
+# sur une décision de taux était fausse d'un facteur 1000, silencieusement,
+# et de façon IDENTIQUE des deux côtés — donc invisible au test de parité.
+# Deux groupes au minimum sont désormais exigés ("12.345.678" reste
+# 12345678.0) ; un groupe unique redevient un décimal. Le flux FF écrit ses
+# milliers avec une VIRGULE (_THOUSANDS_COMMA, inchangé) : aucun NFP ni
+# retail sales n'est concerné par ce resserrement.
+# content_hash INCHANGÉ : canonical_content_hash projette forecast.raw /
+# previous.raw / actual.raw (chaînes brutes), jamais .value.
+_THOUSANDS_DOT = re.compile(r"^-?\d{1,3}(?:\.\d{3}){2,}$")
 _SCALES = {"": 1.0, "K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
 
 
@@ -591,6 +642,23 @@ class SelectionPolicy(BaseModel):
     def _upper(cls, v):
         return None if v is None else tuple(sorted({c.upper() for c in v}))
 
+    @field_validator("display_timezone")
+    @classmethod
+    def _valid_tz(cls, v: str) -> str:
+        """[COMPAT-C13] Miroir du validateur macro (absent ici jusqu'à v2.4.1 :
+        un fuseau invalide levait dans display_tz(), au milieu de
+        build_payload, donc un cycle d'ingestion perdu). Accepte aussi un
+        raccourci opérateur ("TN", "CA-QC") avant de renoncer."""
+        try:
+            ZoneInfo(v)
+            return v
+        except Exception:                                     # noqa: BLE001
+            if _CC_AVAILABLE:
+                resolved = _CC.normalize_tz_token(v)
+                if resolved:
+                    return resolved
+            return _FALLBACK_DISPLAY_TZ
+
     @model_validator(mode="after")
     def _coherent(self):
         if self.window_past_hours < 0 or self.window_future_hours <= 0:
@@ -772,6 +840,17 @@ class CalendarPayload(BaseModel):
     generated_at_utc: datetime
     generator: str = "bluestar-calendar-ingestor"
     content_hash: Optional[str] = None
+    # [COMPAT-C14] Hash du périmètre de CONTRAT (HIGH+MEDIUM, AVANT filtre de
+    # policy, fenêtre ancrée à l'heure ronde). C'est le seul hash réellement
+    # comparable macro/desk : content_hash est un hash de VUE, calculé APRÈS
+    # la policy (desk HIGH+MEDIUM, macro HIGH seul) et il projette
+    # release_group_id, qui dépend de la sélection — un HIGH simultané d'un
+    # MEDIUM est groupé ici et pas là-bas. Optionnels : tout appelant qui
+    # construit un CalendarPayload à la main reste valide.
+    parity_hash: Optional[str] = None
+    parity_hash_method: Optional[str] = None
+    parity_window_anchor_utc: Optional[str] = None
+    parity_scope_event_count: int = 0
     source: SourceInfo
     quality: QualityInfo
     selection_policy: SelectionPolicy
@@ -1118,6 +1197,26 @@ def build_payload(
 
     coverage = _coverage_diagnostics(rows, selected, policy, lo, hi)
 
+    # [COMPAT-C14] Hash de parité, calculé sur ``rows`` (toutes devises, tous
+    # impacts normalisés) AVANT le filtre de policy : macro (HIGH) et desk
+    # (HIGH+MEDIUM) peuvent ainsi se comparer sans qu'aucun des deux ne change
+    # son contrat de sélection. Fenêtre indépendante de la policy et ancrée à
+    # l'heure ronde — sans cet ancrage, l'ingesteur (cycle 300 s) et l'app
+    # macro (synchrone) divergeraient pour une raison purement horlogère.
+    # Un diagnostic ne doit jamais faire tomber une ingestion : en cas
+    # d'échec on renonce au hash, pas au calendrier.
+    _parity_hash = _parity_method = _parity_anchor = None
+    _parity_count = 0
+    if _CC_AVAILABLE:
+        try:
+            _anchor, _plo, _phi = _CC.parity_window(now_utc)
+            _parity_hash = _CC.parity_hash(rows, _plo, _phi)
+            _parity_method = _CC.PARITY_HASH_METHOD
+            _parity_anchor = iso_z(_anchor)
+            _parity_count = len(_CC.parity_projection(rows, _plo, _phi))
+        except Exception as exc:                              # noqa: BLE001
+            warnings.append(f"PARITY_HASH_UNAVAILABLE:{type(exc).__name__}")
+
     seen: Dict[str, Dict[str, Any]] = {}
     duplicates = 0
     for row in selected:
@@ -1270,6 +1369,10 @@ def build_payload(
         quality=quality,
         selection_policy=policy,
         coverage=coverage,
+        parity_hash=_parity_hash,                     # [COMPAT-C14]
+        parity_hash_method=_parity_method,
+        parity_window_anchor_utc=_parity_anchor,
+        parity_scope_event_count=_parity_count,
         events=tuple(events),
     )
     return payload.model_copy(update={"content_hash": canonical_content_hash(payload)})
@@ -1570,6 +1673,18 @@ def _augment_contract(legacy: Dict[str, Any], payload: "CalendarPayload",
         "view_hash": payload.content_hash,
         "high_content_hash": comparable_high_hash(payload.events),
         "high_content_hash_method": COMPARABLE_HASH_METHOD,
+        # [COMPAT-C14] Clés IDENTIQUES côté macro : c'est sur elles que
+        # reconcile() se prononce.
+        "parity_hash": payload.parity_hash,
+        "parity_hash_method": payload.parity_hash_method,
+        "parity_window_anchor_utc": payload.parity_window_anchor_utc,
+        "parity_scope_event_count": payload.parity_scope_event_count,
+        "contract_impact_scope": (list(_CC.CONTRACT_IMPACT_SCOPE)
+                                  if _CC_AVAILABLE else ["HIGH", "MEDIUM"]),
+        # [COMPAT-C13] Traçabilité du fuseau : une heure affichée doit
+        # toujours pouvoir être expliquée (origine + version de la base tz).
+        "display_tz_origin": DISPLAY_TZ_ORIGIN,
+        "timezone_environment": (_CC.tz_environment() if _CC_AVAILABLE else {}),
         "source_payload_sha256": src.payload_sha256,
         "feed_sha256": dict(feed_sha256 or {}),
         "horizon_reference_utc": iso_z(ref),
@@ -1911,8 +2026,39 @@ def to_legacy_payload(payload: CalendarPayload, now_utc: datetime) -> Dict[str, 
         "events_engine": list(rows),
         "summary_by_day": {k: summary[k] for k in sorted(summary)},
     }
+    # [COMPAT-C13] Localisation d'affichage, en toute fin de chaîne : après
+    # que priority / time_proximity / status (UTC purs) ont été figés.
+    # Réécrit date_display / time_display / datetime_display / day_of_week /
+    # display_timezone sur les lignes ; "events" et "events_engine" étant
+    # deux listes DISTINCTES d'objets dict PARTAGÉS (list(rows) x2, port
+    # [M5]), localiser ``rows`` suffit et les garde cohérentes.
+    # summary_by_day est indexé par date d'AFFICHAGE : sans recalcul, un
+    # événement de 23:00 UTC apparaîtrait sous la veille dans le sommaire et
+    # sous le lendemain dans les lignes.
+    if _CC_AVAILABLE:
+        _tzk, _tzo = _CC.resolve_display_tz(fallback=_FALLBACK_DISPLAY_TZ)
+        try:
+            _CC.localize_rows(rows, _tzk, _tzo)
+            _legacy["summary_by_day"] = _CC.rebuild_summary_by_day(rows)
+            _legacy["metadata"]["display_timezone"] = _tzk
+            _legacy["metadata"]["display_tz_origin"] = _tzo
+            _legacy["metadata"]["timezone"] = f"UTC (backend) / {_tzk} (display)"
+        except Exception:                                     # noqa: BLE001
+            pass   # heures conservées dans le fuseau de la policy
+
     # [COMPAT-C6] clés du contrat commun (setdefault : rien d'existant ne change).
     _augment_contract(_legacy, payload, rows,
                       feed_sha256=dict(payload.source.feed_sha256 or {}),
                       bounds_basis="retained_events")
     return _legacy
+
+
+def to_committee_view(payload: CalendarPayload, now_utc: datetime,
+                      legacy: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """[COMPAT-C15] Vue machine destinée à l'app committee (UTC pur, aucune
+    chaîne localisée). Purement additive : ``to_legacy_payload`` reste le
+    contrat de l'ENGINE et du pipeline de merge."""
+    if not _CC_AVAILABLE:                                     # pragma: no cover
+        raise RuntimeError("calendar_compat requis pour la vue committee")
+    return _CC.to_committee_payload(legacy or to_legacy_payload(payload, now_utc),
+                                    now_utc, module="desk")
