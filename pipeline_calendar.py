@@ -56,6 +56,7 @@ from urllib3.util.retry import Retry
 from calendar_core import (
     SCHEMA_VERSION,
     CalendarPayload,
+    to_committee_view,
     DEFAULT_POLICY,
     QualityStatus,
     SelectionPolicy,
@@ -74,7 +75,7 @@ __all__ = [
     "SCHEMA_VERSION", "SOURCE_URLS", "MIN_FETCH_SPACING_S", "FetchError",
     "RateLimited", "build_session", "fetch_source", "run_once", "emit_seed",
     "is_rate_limited", "read_rate_limit", "apply_rate_limit", "clear_rate_limit",
-    "ingest_disabled", "tz_environment", "main",
+    "ingest_disabled", "tz_environment", "main", "to_committee_view",
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -467,6 +468,11 @@ def write_health(data_dir: Path, now: datetime, payload: Optional[CalendarPayloa
         "event_count": len(payload.events) if payload else 0,
         "data_quality_score": payload.quality.data_quality_score if payload else 0.0,
         "content_hash": payload.content_hash if payload else None,
+        # [COMPAT-C14] Le hash comparable au macro. C'est LUI qu'on regarde
+        # pour répondre à « les deux apps voient-elles le même calendrier ? ».
+        "parity_hash": payload.parity_hash if payload else None,
+        "parity_window_anchor_utc": (payload.parity_window_anchor_utc
+                                     if payload else None),
         "warnings": list(payload.quality.warnings) if payload else [],
         "feeds_status": dict(payload.source.feed_status) if payload else {},
         "tz": tz_environment(),
@@ -575,13 +581,22 @@ def run_once(data_dir: Path, session: Optional[requests.Session] = None,
     atomic_write_json(data_dir / "calendar.latest.json", canonical)
     atomic_write_json(data_dir / "calendar.json", legacy)
     atomic_write_json(data_dir / "calendar.legacy.json", legacy)
+    # [COMPAT-C15] Artefact consommé par l'app committee. Écrit APRÈS les
+    # artefacts historiques : un échec ici ne doit jamais empêcher la
+    # publication du calendrier lui-même.
+    try:
+        atomic_write_json(data_dir / "calendar.committee.json",
+                          to_committee_view(payload, now, legacy))
+    except Exception:                                         # noqa: BLE001
+        LOG.exception("committee view not written (non-blocking)")
     write_health(data_dir, now, payload, None)
     clear_rate_limit(data_dir)
 
-    LOG.info("published %d events | status=%s | score=%.2f | hash=%s",
+    LOG.info("published %d events | status=%s | score=%.2f | hash=%s | parity=%s",
              len(payload.events), payload.quality.status.value,
              payload.quality.data_quality_score,
-             (payload.content_hash or "").split(":")[-1][:12])
+             (payload.content_hash or "").split(":")[-1][:12],
+             (payload.parity_hash or "").split(":")[-1][:12] or "n/a")
     return payload
 
 
@@ -672,4 +687,3 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
