@@ -144,6 +144,20 @@ def _scan_and_rerun(msg_key: str, *, timeout: float = 30.0) -> None:
     st.rerun()
 
 
+
+# À l'ouverture : si l'artefact est plus vieux que l'espacement minimal de
+# fetch, on attend la fin du cycle qu'on vient de lancer plutôt que de servir
+# l'état stale (sur Cloud, data/ est reverté à chaque restart du conteneur).
+LOAD_REFRESH_TIMEOUT_S = 12.0
+
+
+def _load_refresh_due() -> bool:
+    """L'artefact canonique est-il assez vieux pour justifier d'attendre le
+    cycle en cours à l'ouverture de la page ?"""
+    if pc.ingest_disabled() or not CANONICAL_PATH.exists():
+        return False
+    return (time.time() - CANONICAL_PATH.stat().st_mtime) > pc.MIN_FETCH_SPACING_S
+
 # ═══════════════════════════════════════════════════════════════════════════
 # CHARGEMENT (cache invalidé par les stats fichier)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -396,6 +410,20 @@ def render_live_strip() -> None:
             f"<b>{len(warnings)} signal(aux) qualité.</b> {head} — détail dans "
             "l'onglet Diagnostics.",
             "warn" if status != "INVALID" else "bad"))
+
+    # [refresh auto] Un artefact plus frais que celui servi au dernier rerun
+    # complet vient d'arriver (cycle de fond ou scan lancé d'un autre onglet) :
+    # un seul rerun global pour que les téléchargements de l'onglet Export
+    # embarquent les octets frais — sans lui, ils serviraient l'artefact
+    # précédent. Le premier passage se contente de mémoriser l'identifiant
+    # servi (pas de rerun à froid).
+    _fid = (src.get("fetched_at_utc")
+            or payload.get("generated_at_utc")) if payload else None
+    if _fid:
+        _prev = st.session_state.get("_served_fid")
+        st.session_state["_served_fid"] = _fid
+        if _prev and _prev != _fid:
+            st.rerun()
 
 
 def render_sidebar(events: List[dict]) -> Filters:
@@ -692,7 +720,18 @@ def main() -> None:
                              "macroéconomique normalisé (Forex Factory / Fair Economy)."},
     )
     U.inject()
-    INGESTION.kick()
+
+    # [refresh à l'ouverture] « j'ouvre le lien, c'est frais ». kick()
+    # lance le cycle en arrière-plan ; si l'artefact est stale (typiquement
+    # après un restart du conteneur Cloud, qui revert data/ à l'état
+    # commité), on en attend la fin avant de rendre la page — les
+    # téléchargements de l'onglet Export servent alors l'artefact frais
+    # dès le premier rendu. Borné : un cycle trop lent sert l'état
+    # précédent et le bandeau ci-dessous rafraîchit seul.
+    _state = INGESTION.kick()
+    if _state in ("started", "running") and _load_refresh_due():
+        with st.spinner("Rafraîchissement du calendrier…"):
+            INGESTION.wait_done(timeout=LOAD_REFRESH_TIMEOUT_S)
 
     payload, is_seed = canonical()
     now = datetime.now(UTC)
