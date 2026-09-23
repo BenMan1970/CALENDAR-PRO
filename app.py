@@ -326,7 +326,7 @@ def render_live_strip() -> None:
         U.kpi("Prochaine publication",
               nxt["countdown"] if nxt else "—",
               f"{nxt['currency']} · {nxt['name'][:38]}" if nxt else "aucun événement à venir",
-              color=U.IMPACU.get(nxt["impact"], U.ACCENT) if nxt else None,
+              color=U.IMPACT.get(nxt["impact"], U.ACCENT) if nxt else None,
               mono=True, delay_ms=0),
         U.kpi("Fenêtre active", f"{len(upcoming)}",
               f"{imminent} dans les 6 h · {len(high)} à fort impact",
