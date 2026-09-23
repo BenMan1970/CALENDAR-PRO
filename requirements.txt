@@ -1,4 +1,4 @@
-﻿# BLUESTAR Pipeline Calendar — UI Midnight Luxe
+# BLUESTAR Pipeline Calendar — UI Midnight Luxe
 #
 # Install: pip install -r requirements.txt
 # To generate seed for Cloud: python pipeline_calendar.py --seed

@@ -1,16 +1,16 @@
 """
 BLUESTAR Pipeline Calendar — UI « Midnight Luxe »
 =================================================
-Orchestre pipeline_calendar.py et expose les news + le JSON, avec un design
-system maison (theme.py / components.py / charts.py).
+Orchestre pipeline_calendar.py et expose les news + le JSON, avec le design
+system maison (ui.py : tokens, styles, composants et charts).
 
-Doctrine conservée du code d'origine :
+Doctrine :
   • le JSON produit est celui de calendar_core.py, INCHANGÉ (parité de
     content_hash inter-apps) ;
   • aucun widget n'alimente la SelectionPolicy : les filtres de cette page
     sont des filtres de VUE, et les exports téléchargent les OCTETS DU
     DISQUE — l'artefact consommé par le merge ne peut pas être contaminé ;
-  • ingestion en thread de fond non bloquant, fallback seed au cold-start,
+  • ingestion en thread de fond non bloquante, fallback seed au cold-start,
     cache invalidé par (mtime_ns, size) du fichier.
 """
 from __future__ import annotations
@@ -25,10 +25,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 
-import charts
-import components as C
 import pipeline_calendar as pc
-import theme as T
+import ui as U
 
 UTC = timezone.utc
 
@@ -93,20 +91,21 @@ class Ingestion:
             self._running = False
 
 
-INGESTION = Ingestion()
+@st.cache_resource(show_spinner=False)
+def _new_ingestion() -> Ingestion:
+    """Instance persistante : sans ce cache, elle est réinstanciée à chaque
+    rerun complet (filtre sidebar, onglet), ce qui réinitialise ``_running``
+    à False et permet à deux run_once() de tourner en parallèle — la garantie
+    « jamais plus d'un fetch concurrent » de la classe ne tient plus."""
+    return Ingestion()
+
+
+INGESTION = _new_ingestion()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # CHARGEMENT (cache invalidé par les stats fichier)
 # ═══════════════════════════════════════════════════════════════════════════
-def _read_json(path: Path) -> Optional[Any]:
-    try:
-        with open(path, encoding="utf-8") as fh:
-            return json.load(fh)
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
 def _stats(path: Path) -> Tuple[int, int]:
     try:
         s = path.stat()
@@ -118,20 +117,20 @@ def _stats(path: Path) -> Tuple[int, int]:
 @st.cache_data(show_spinner=False, ttl=20)
 def load_canonical(mt: int = 0, sz: int = 0) -> Tuple[Optional[dict], bool]:
     """JSON canonique v2 ; fallback seed si data/ vide (cold-start Cloud)."""
-    data = _read_json(CANONICAL_PATH)
+    data = pc.read_json(CANONICAL_PATH)
     if data is not None:
         return data, False
-    seed = _read_json(SEED_PATH)
+    seed = pc.read_json(SEED_PATH)
     return (seed, True) if seed is not None else (None, False)
 
 
 @st.cache_data(show_spinner=False, ttl=20)
 def load_legacy(mt: int = 0, sz: int = 0) -> Tuple[Optional[dict], bool]:
     """JSON legacy v1 ; reconstruit depuis le seed si absent du disque."""
-    data = _read_json(LEGACY_PATH)
+    data = pc.read_json(LEGACY_PATH)
     if data is not None:
         return data, False
-    seed = _read_json(SEED_PATH)
+    seed = pc.read_json(SEED_PATH)
     if seed and "events" in seed:
         try:
             from calendar_core import CalendarPayload, to_legacy_payload
@@ -144,7 +143,7 @@ def load_legacy(mt: int = 0, sz: int = 0) -> Tuple[Optional[dict], bool]:
 
 @st.cache_data(show_spinner=False, ttl=20)
 def load_health(mt: int = 0, sz: int = 0) -> Optional[dict]:
-    return _read_json(HEALTH_PATH)
+    return pc.read_json(HEALTH_PATH)
 
 
 def canonical() -> Tuple[Optional[dict], bool]:
@@ -259,16 +258,16 @@ def apply_filters(events: List[dict], f: Filters, now: datetime) -> List[dict]:
 def serving_state(payload: Optional[dict], is_seed: bool) -> Tuple[str, str, bool]:
     """(label, couleur, pulsation) — état de service lisible en un coup d'œil."""
     if pc.ingest_disabled():
-        return "MODE LECTEUR", T.MUTED, False
+        return "MODE LECTEUR", U.MUTED, False
     if pc.is_rate_limited(DATA_DIR):
-        return "COOLDOWN 429", T.WARN, False
+        return "COOLDOWN 429", U.WARN, False
     if INGESTION.running:
-        return "INGESTION", T.ACCENT, True
+        return "INGESTION", U.ACCENT, True
     if is_seed:
-        return "SEED · COLD START", T.WARN, False
+        return "SEED · COLD START", U.WARN, False
     if payload:
-        return "LIVE", T.OK, True
-    return "INDISPONIBLE", T.BAD, False
+        return "LIVE", U.OK, True
+    return "INDISPONIBLE", U.BAD, False
 
 
 def render_hero(payload: Optional[dict], is_seed: bool) -> None:
@@ -276,12 +275,12 @@ def render_hero(payload: Optional[dict], is_seed: bool) -> None:
     src = (payload or {}).get("source", {})
     quality = (payload or {}).get("quality", {})
     pills = [
-        C.pill(label, color, live=live),
-        C.pill(f"{len((payload or {}).get('events', []))} événements", T.MUTED),
-        C.pill(quality.get("status", "—"),
-               T.QUALITY_COLOR.get(quality.get("status", ""), T.GHOST)),
+        U.pill(label, color, live=live),
+        U.pill(f"{len((payload or {}).get('events', []))} événements", U.MUTED),
+        U.pill(quality.get("status", "—"),
+               U.QUALITY_COLOR.get(quality.get("status", ""), U.GHOST)),
     ]
-    C.render(C.hero(
+    U.render(U.hero(
         "Forex Factory · Fair Economy",
         "Pipeline",
         "Calendar",
@@ -300,7 +299,7 @@ def render_live_strip() -> None:
     payload, is_seed = canonical()
     now = datetime.now(UTC)
     if not payload:
-        C.render(C.empty("Aucun artefact disponible",
+        U.render(U.empty("Aucun artefact disponible",
                          "L'ingestion initiale est en cours — le bandeau se "
                          "remplira automatiquement dès le premier cycle publié."))
         return
@@ -324,35 +323,35 @@ def render_live_strip() -> None:
 
     imminent = sum(1 for e in upcoming if e["hours_until"] <= 6)
     cards = [
-        C.kpi("Prochaine publication",
+        U.kpi("Prochaine publication",
               nxt["countdown"] if nxt else "—",
               f"{nxt['currency']} · {nxt['name'][:38]}" if nxt else "aucun événement à venir",
-              color=T.IMPACT.get(nxt["impact"], T.ACCENT) if nxt else None,
+              color=U.IMPACU.get(nxt["impact"], U.ACCENT) if nxt else None,
               mono=True, delay_ms=0),
-        C.kpi("Fenêtre active", f"{len(upcoming)}",
+        U.kpi("Fenêtre active", f"{len(upcoming)}",
               f"{imminent} dans les 6 h · {len(high)} à fort impact",
               bar=min(1.0, len(upcoming) / 40.0), delay_ms=40),
-        C.kpi("Qualité artefact", str(status), f"score {score:.3f}",
-              color=T.QUALITY_COLOR.get(status, T.GHOST), bar=score, delay_ms=80),
-        C.kpi("Fraîcheur source",
+        U.kpi("Qualité artefact", str(status), f"score {score:.3f}",
+              color=U.QUALITY_COLOR.get(status, U.GHOST), bar=score, delay_ms=80),
+        U.kpi("Fraîcheur source",
               f"{age_s}s" if age_s is not None else "—",
               f"hash {(payload.get('content_hash') or '').split(':')[-1][:12] or '—'}",
               mono=True,
-              color=T.OK if (age_s is not None and age_s < 900) else T.WARN,
+              color=U.OK if (age_s is not None and age_s < 900) else U.WARN,
               delay_ms=120),
     ]
-    C.render(C.kpi_grid(cards))
+    U.render(U.kpi_grid(cards))
 
     warnings = list(quality.get("warnings") or [])
     if is_seed:
-        C.render(C.note(
+        U.render(U.note(
             "<b>Données semence.</b> Le disque était vide au démarrage "
             "(cold-start Streamlit Cloud) : la vue s'appuie sur "
             "<code>seed/calendar.latest.seed.json</code> jusqu'au premier cycle frais.",
             "warn"))
     elif warnings:
         head = ", ".join(w.split(":")[0] for w in warnings[:4])
-        C.render(C.note(
+        U.render(U.note(
             f"<b>{len(warnings)} signal(aux) qualité.</b> {head} — détail dans "
             "l'onglet Diagnostics.",
             "warn" if status != "INVALID" else "bad"))
@@ -360,12 +359,12 @@ def render_live_strip() -> None:
 
 def render_sidebar(events: List[dict]) -> Filters:
     with st.sidebar:
-        C.render(
+        U.render(
             '<div style="display:flex;align-items:center;gap:10px;margin-bottom:2px;">'
             f'<div style="width:26px;height:26px;border-radius:8px;'
-            f'background:linear-gradient(135deg,{T.ACCENT},#34D399);opacity:.9"></div>'
+            f'background:linear-gradient(135deg,{U.ACCENT},#34D399);opacity:.9"></div>'
             '<div><div style="font-weight:750;letter-spacing:-.03em;font-size:.95rem">BLUESTAR</div>'
-            f'<div style="font-size:.62rem;letter-spacing:.18em;color:{T.GHOST}">'
+            f'<div style="font-size:.62rem;letter-spacing:.18em;color:{U.GHOST}">'
             'CALENDAR ENGINE</div></div></div>'
         )
         st.markdown("")
@@ -397,11 +396,11 @@ def render_sidebar(events: List[dict]) -> Filters:
             st.rerun()
 
         if msg := st.session_state.pop("_kick_msg", None):
-            C.render(C.note(f"<b>{msg[0]}</b>", msg[1]))
+            U.render(U.note(f"<b>{msg[0]}</b>", msg[1]))
 
-        C.render(
-            f'<div style="margin-top:14px;font-size:.66rem;color:{T.GHOST};'
-            f'font-family:{T.MONO};line-height:1.7">'
+        U.render(
+            f'<div style="margin-top:14px;font-size:.66rem;color:{U.GHOST};'
+            f'font-family:{U.MONO};line-height:1.7">'
             f'DATA_DIR · {DATA_DIR.name}/<br>'
             f'SPACING · {pc.MIN_FETCH_SPACING_S}s<br>'
             f'SCHEMA · {pc.SCHEMA_VERSION}</div>'
@@ -419,7 +418,7 @@ def render_sidebar(events: List[dict]) -> Filters:
 
 def render_feed(events: List[dict], f: Filters) -> None:
     if not events:
-        C.render(C.empty(
+        U.render(U.empty(
             "Aucun événement sur ce périmètre",
             "Élargissez l'horizon ou les niveaux d'impact dans le panneau latéral. "
             "Un calendrier creux est un fait de marché, pas une panne."))
@@ -432,41 +431,41 @@ def render_feed(events: List[dict], f: Filters) -> None:
     blocks: List[str] = []
     for day, rows in groups.items():
         label = f"{rows[0]['day_of_week']} · {day}" if rows[0]["day_of_week"] else day
-        cards = [C.event_card(e, show_pairs=f.show_pairs, delay_ms=min(i * 22, 260))
+        cards = [U.event_card(e, show_pairs=f.show_pairs, delay_ms=min(i * 22, 260))
                  for i, e in enumerate(rows)]
-        blocks.append(C.day_header(label, len(rows)) + C.feed(cards))
-    C.render(*blocks)
+        blocks.append(U.day_header(label, len(rows)) + U.feed(cards))
+    U.render(*blocks)
 
 
 def render_analytics(events: List[dict]) -> None:
-    if not charts.AVAILABLE:
-        C.render(C.note("<b>Plotly absent de l'environnement.</b> "
+    if not U.AVAILABLE:
+        U.render(U.note("<b>Plotly absent de l'environnement.</b> "
                         "Ajoutez <code>plotly</code> à requirements.txt pour "
                         "activer les visualisations.", "warn"))
         return
     if not events:
-        C.render(C.empty("Rien à visualiser", "Aucun événement sur le périmètre courant."))
+        U.render(U.empty("Rien à visualiser", "Aucun événement sur le périmètre courant."))
         return
 
     c1, c2, c3 = st.columns([1.45, 1, 1])
     with c1, st.container(border=True):
-        C.panel_title("Densité par jour", "volume · impact")
-        fig = charts.density_by_day(events)
+        U.panel_title("Densité par jour", "volume · impact")
+        fig = U.density_by_day(events)
         if fig:
-            st.plotly_chart(fig, config=charts.PLOTLY_CONFIG, width="stretch")
+            st.plotly_chart(fig, config=U.PLOTLY_CONFIG, width="stretch")
     with c2, st.container(border=True):
-        C.panel_title("Répartition d'impact", "mix")
-        fig = charts.impact_donut(events)
+        U.panel_title("Répartition d'impact", "mix")
+        fig = U.impact_donut(events)
         if fig:
-            st.plotly_chart(fig, config=charts.PLOTLY_CONFIG, width="stretch")
+            st.plotly_chart(fig, config=U.PLOTLY_CONFIG, width="stretch")
     with c3, st.container(border=True):
-        C.panel_title("Charge par devise", "top 9")
-        fig = charts.currency_exposure(events)
+        U.panel_title("Charge par devise", "top 9")
+        fig = U.currency_exposure(events)
         if fig:
-            st.plotly_chart(fig, config=charts.PLOTLY_CONFIG, width="stretch")
+            st.plotly_chart(fig, config=U.PLOTLY_CONFIG, width="stretch")
 
     with st.container(border=True):
-        C.panel_title("Grille dense", "vue tabulaire")
+        U.panel_title("Grille dense", "vue tabulaire")
         st.dataframe(
             [{
                 "Date": e["date_display"], "Heure": e["hm"], "TZ": e["tz_label"],
@@ -491,39 +490,39 @@ def render_analytics(events: List[dict]) -> None:
 def render_summary() -> None:
     lg, from_seed = legacy()
     if not lg:
-        C.render(C.empty("Résumé indisponible",
+        U.render(U.empty("Résumé indisponible",
                          "L'artefact legacy v1 n'a pas encore été publié."))
         return
     meta = lg.get("metadata", {}) or {}
     if from_seed:
-        C.render(C.note("<b>Résumé reconstruit depuis le seed</b> — "
+        U.render(U.note("<b>Résumé reconstruit depuis le seed</b> — "
                         "le format legacy v1 est régénéré en mémoire.", "warn"))
 
-    C.render(C.kpi_grid([
-        C.kpi("Horizon servi", f"{meta.get('feed_horizon_h') or '—'} h",
+    U.render(U.kpi_grid([
+        U.kpi("Horizon servi", f"{meta.get('feed_horizon_h') or '—'} h",
               str(meta.get("feed_horizon_state") or "—"), mono=True),
-        C.kpi("Mode de service", str(meta.get("serving_mode") or "—"),
+        U.kpi("Mode de service", str(meta.get("serving_mode") or "—"),
               f"flux OK {meta.get('feeds_ok', '—')}/{meta.get('feeds_total', '—')}"),
-        C.kpi("Fort impact", str(meta.get("high_impact_count", "—")),
+        U.kpi("Fort impact", str(meta.get("high_impact_count", "—")),
               f"{meta.get('engine_events_count', '—')} lignes moteur"),
-        C.kpi("Imminents", str(meta.get("imminent_count", "—")),
+        U.kpi("Imminents", str(meta.get("imminent_count", "—")),
               f"{meta.get('upcoming_count', '—')} à venir"),
     ]))
 
     if note_txt := meta.get("coverage_note"):
-        C.render(C.note(f"<b>Couverture.</b> {note_txt}"))
+        U.render(U.note(f"<b>Couverture.</b> {note_txt}"))
 
     summary = lg.get("summary_by_day", {}) or {}
     if not summary:
-        C.render(C.empty("Aucun jour couvert", "Le résumé quotidien est vide."))
+        U.render(U.empty("Aucun jour couvert", "Le résumé quotidien est vide."))
         return
     for day, items in sorted(summary.items()):
         with st.expander(f"{day}  ·  {len(items)} événement(s)"):
-            C.render(
+            U.render(
                 '<div style="display:flex;flex-direction:column;gap:6px;">'
                 + "".join(
-                    f'<div style="font-size:.79rem;color:{T.MUTED};'
-                    f'font-family:{T.MONO}">{item}</div>' for item in items
+                    f'<div style="font-size:.79rem;color:{U.MUTED};'
+                    f'font-family:{U.MONO}">{item}</div>' for item in items
                 ) + "</div>"
             )
 
@@ -533,7 +532,7 @@ def render_exports() -> None:
     lg, _ = legacy()
     hp = health()
 
-    C.render(C.note(
+    U.render(U.note(
         "<b>Exports fidèles au disque.</b> Les boutons servent les octets "
         "exacts des artefacts publiés par l'ingesteur : ni les filtres de "
         "cette page ni le fuseau d'affichage ne peuvent altérer un fichier "
@@ -550,15 +549,15 @@ def render_exports() -> None:
         with col, st.container(border=True):
             data = disk_bytes(path, fallback)
             available = bool(fallback) or path.exists()
-            C.panel_title(name, hint)
+            U.panel_title(name, hint)
             if available:
                 st.download_button(
                     f"Télécharger · {len(data) / 1024:.1f} KiB",
                     data=data, file_name=name, mime="application/json",
                     type=kind, width="stretch", key=f"dl_{name}",
                 )
-                C.render(f'<div style="font-size:.66rem;color:{T.GHOST};'
-                         f'font-family:{T.MONO};margin-top:8px">'
+                U.render(f'<div style="font-size:.66rem;color:{U.GHOST};'
+                         f'font-family:{U.MONO};margin-top:8px">'
                          f'{"disque" if path.exists() else "reconstruit"} · '
                          f'{len(data)} octets</div>')
             else:
@@ -577,8 +576,8 @@ def render_diagnostics() -> None:
 
     c1, c2 = st.columns(2)
     with c1, st.container(border=True):
-        C.panel_title("Service", "état d'exécution")
-        C.render(C.kv_table([
+        U.panel_title("Service", "état d'exécution")
+        U.render(U.kv_table([
             ("data_dir", str(DATA_DIR)),
             ("canonical présent", CANONICAL_PATH.exists()),
             ("seed présent", SEED_PATH.exists()),
@@ -591,16 +590,16 @@ def render_diagnostics() -> None:
             ("espacement min", f"{pc.MIN_FETCH_SPACING_S}s"),
         ]))
     with c2, st.container(border=True):
-        C.panel_title("Autorité des règles horaires", "audit B2")
+        U.panel_title("Autorité des règles horaires", "audit B2")
         auth = bool(tz.get("pip_tzdata_authoritative"))
-        C.render(C.note(
+        U.render(U.note(
             "<b>tzdata pip prioritaire.</b> Les offsets affichés proviennent "
             "du paquet épinglé." if auth else
             "<b>tzdata système en tête de TZPATH.</b> Les offsets peuvent "
             "être périmés selon l'image d'exécution.",
             "ok" if auth else "warn"))
         st.markdown("")
-        C.render(C.kv_table([
+        U.render(U.kv_table([
             ("tzdata (pip)", tz.get("tzdata_pip_version")),
             ("TZPATH[0]", tz.get("tzpath_head")),
             *[(f"Casablanca {k}", f"{v[0]:+.2f}h · {v[1]}")
@@ -608,23 +607,23 @@ def render_diagnostics() -> None:
         ]))
 
     with st.container(border=True):
-        C.panel_title("Flux sources", "statut par endpoint")
+        U.panel_title("Flux sources", "statut par endpoint")
         feeds = ((can or {}).get("source", {}) or {}).get("feed_status", {}) or {}
-        pills = [C.pill(f"{k} · {v}",
-                        T.OK if str(v).startswith("ok")
-                        else (T.WARN if "404" in str(v) else T.BAD))
-                 for k, v in feeds.items()] or [C.pill("aucun statut publié", T.GHOST)]
-        C.render(f'<div style="display:flex;gap:8px;flex-wrap:wrap">{"".join(pills)}</div>')
+        pills = [U.pill(f"{k} · {v}",
+                        U.OK if str(v).startswith("ok")
+                        else (U.WARN if "404" in str(v) else U.BAD))
+                 for k, v in feeds.items()] or [U.pill("aucun statut publié", U.GHOST)]
+        U.render(f'<div style="display:flex;gap:8px;flex-wrap:wrap">{"".join(pills)}</div>')
         st.markdown("")
-        C.render(C.kv_table([(f"source #{i + 1}", u)
+        U.render(U.kv_table([(f"source #{i + 1}", u)
                              for i, u in enumerate(pc.SOURCE_URLS)]))
 
     warnings = ((can or {}).get("quality", {}) or {}).get("warnings") or []
     rejections = ((can or {}).get("quality", {}) or {}).get("rejections") or []
     if warnings or rejections:
         with st.container(border=True):
-            C.panel_title("Signaux qualité", f"{len(warnings)} warning(s) · {len(rejections)} rejet(s)")
-            C.render(*[C.note(f"<code>{w}</code>",
+            U.panel_title("Signaux qualité", f"{len(warnings)} warning(s) · {len(rejections)} rejet(s)")
+            U.render(*[U.note(f"<code>{w}</code>",
                               "bad" if "INVALID" in w or "EXPIRED" in w else "warn")
                        + '<div style="height:6px"></div>' for w in warnings])
             if rejections:
@@ -632,7 +631,7 @@ def render_diagnostics() -> None:
                     st.code("\n".join(str(r) for r in rejections), language="text")
 
     with st.container(border=True):
-        C.panel_title("health.json", "dernier cycle")
+        U.panel_title("health.json", "dernier cycle")
         st.json(hp, expanded=False)
 
 
@@ -648,7 +647,7 @@ def main() -> None:
         menu_items={"about": "BLUESTAR Pipeline Calendar — calendrier "
                              "macroéconomique normalisé (Forex Factory / Fair Economy)."},
     )
-    T.inject()
+    U.inject()
     INGESTION.kick()
 
     payload, is_seed = canonical()
@@ -666,11 +665,11 @@ def main() -> None:
         ["Flux", "Analytique", "Résumé", "Export", "Diagnostics"]
     )
     with tab_feed:
-        C.render(
+        U.render(
             f'<div style="display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 4px">'
-            f'{C.pill(f"{len(view)} / {len(all_events)} événements", T.MUTED)}'
-            f'{C.pill(f"horizon {filters.horizon_h} h", T.MUTED)}'
-            f'{C.pill("filtres de vue uniquement", T.ACCENT)}</div>'
+            f'{U.pill(f"{len(view)} / {len(all_events)} événements", U.MUTED)}'
+            f'{U.pill(f"horizon {filters.horizon_h} h", U.MUTED)}'
+            f'{U.pill("filtres de vue uniquement", U.ACCENT)}</div>'
         )
         render_feed(view, filters)
     with tab_analytics:
@@ -683,10 +682,10 @@ def main() -> None:
         render_diagnostics()
 
     gen = (payload or {}).get("generated_at_utc", "—")
-    C.render(
+    U.render(
         f'<div style="margin-top:34px;padding-top:14px;'
-        f'border-top:1px solid {T.LINE};display:flex;justify-content:space-between;'
-        f'flex-wrap:wrap;gap:10px;font-size:.68rem;color:{T.GHOST};font-family:{T.MONO}">'
+        f'border-top:1px solid {U.LINE};display:flex;justify-content:space-between;'
+        f'flex-wrap:wrap;gap:10px;font-size:.68rem;color:{U.GHOST};font-family:{U.MONO}">'
         f'<span>BLUESTAR CALENDAR · core {pc.SCHEMA_VERSION}</span>'
         f'<span>généré {gen}</span>'
         f'<span>{"ingestion en cours" if INGESTION.running else "au repos"}</span></div>'

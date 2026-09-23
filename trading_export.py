@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 BLUESTAR Calendar Pro - Trading Export Generator
 Génère un JSON optimisé pour les applications de trading.

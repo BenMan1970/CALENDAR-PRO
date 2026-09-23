@@ -1,30 +1,21 @@
 #!/usr/bin/env python3
 """
 BLUESTAR Pipeline Calendar — ingesteur
-======================================
+=====================================
 Fetche les news économiques depuis Fair Economy (Forex Factory) et produit
 les artefacts JSON consommés par le pipeline de merge.
-
-FIX 429 (cause racine de l'écran vide sur Streamlit Cloud) :
-  - 429 retiré de ``status_forcelist`` → urllib3 ne réessaie PAS un quota
-  - ``respect_retry_after_header=False`` → pas de sommeil de 247 s dans le thread
-  - ``RateLimited`` est un événement de flux, pas une panne → breaker INTACT
-  - cooldown persisté sur disque (rate_limit.json) entre deux tentatives
-
-CORRECTIF v1.1 (2026-09-17) — LE COOLDOWN 429 N'ÉTAIT JAMAIS HONORÉ :
-  ``apply_rate_limit`` écrivait la clé ``rate_limited_until_utc`` tandis que
-  ``is_rate_limited`` lisait ``blocked_until_utc``. Le garde retournait donc
-  toujours False et l'app retapait la source à chaque cycle, rallumant le
-  quota qu'on croyait éteint. Les deux fonctions partagent maintenant une
-  constante unique (``_RL_KEY``), l'ancienne clé restant écrite en alias
-  pour tout lecteur externe. Ajouts : ``read_rate_limit`` (état exposé à
-  l'UI), mode lecteur ``BLUESTAR_DISABLE_INGEST`` (B3), session HTTP
-  jetable par cycle (B4), archivage des octets bruts dans ``raw/``.
 
 Sources :
   primaire   : https://nfs.faireconomy.media/ff_calendar_thisweek.json
   secondaire : https://d1tcktd03x2wof.cloudfront.net/ff_calendar_thisweek.json
   nextweek   : https://nfs.faireconomy.media/ff_calendar_nextweek.json (404 normal)
+
+Politique 429 (cause racine de l'écran vide sur Streamlit Cloud) :
+  - 429 retiré de ``status_forcelist`` → urllib3 ne réessaie PAS un quota ;
+  - ``respect_retry_after_header=False`` → pas de sommeil de 247 s dans le
+    thread ;
+  - ``RateLimited`` est un événement de flux, pas une panne : breaker INTACT,
+    cooldown persisté sur disque (rate_limit.json) entre deux tentatives.
 
 Usage :
   python pipeline_calendar.py --once
@@ -42,7 +33,7 @@ import os
 import sys
 import threading
 import time
-from contextlib import closing
+from contextlib import closing, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -85,11 +76,10 @@ SOURCE_URLS: Tuple[str, ...] = (
     "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
     "https://d1tcktd03x2wof.cloudfront.net/ff_calendar_thisweek.json",
 )
-# [COMPAT-C10] nextweek OPT-IN (comme le macro, audit v6.1 [M2]) : mesuré ici
-# même — health.json vendredi 18/09 14:32Z ET calendar.json dimanche 20/09
-# 22:44Z portent « nextweek: absent_404 ». Un GET mort toutes les 300 s (~288/j)
-# contre une source qui rate-limite est un risque sans contrepartie.
-# Réactivation : BLUESTAR_SOURCE_URL_NEXT=https://nfs.faireconomy.media/ff_calendar_nextweek.json
+# [COMPAT-C10] nextweek OPT-IN : la source a régulièrement renvoyé
+# « absent_404 » — un GET mort toutes les 300 s contre une source qui
+# rate-limite est un risque sans contrepartie.
+# Activer : BLUESTAR_SOURCE_URL_NEXT=https://nfs.faireconomy.media/ff_calendar_nextweek.json
 SOURCE_URL_NEXT = os.getenv("BLUESTAR_SOURCE_URL_NEXT", "") or None
 
 SOURCE_PROVIDER = "Forex Factory / Fair Economy weekly public feed"
@@ -391,7 +381,7 @@ def read_json(path: Path) -> Optional[Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 # COOLDOWN 429 (persisté sur disque)
 # ─────────────────────────────────────────────────────────────────────────────
-# [CORRECTIF v1.1] UNE seule clé, partagée par l'écrivain et le lecteur.
+# Une seule clé, partagée par l'écrivain et le lecteur (v1.1).
 _RL_KEY = "blocked_until_utc"
 
 
@@ -468,8 +458,8 @@ def write_health(data_dir: Path, now: datetime, payload: Optional[CalendarPayloa
         "event_count": len(payload.events) if payload else 0,
         "data_quality_score": payload.quality.data_quality_score if payload else 0.0,
         "content_hash": payload.content_hash if payload else None,
-        # [COMPAT-C14] Le hash comparable au macro. C'est LUI qu'on regarde
-        # pour répondre à « les deux apps voient-elles le même calendrier ? ».
+        # [COMPAT-C14] Hash comparable au macro : « les deux apps voient-elles
+        # le même calendrier ? »
         "parity_hash": payload.parity_hash if payload else None,
         "parity_window_anchor_utc": (payload.parity_window_anchor_utc
                                      if payload else None),
@@ -528,7 +518,7 @@ def run_once(data_dir: Path, session: Optional[requests.Session] = None,
     error: Optional[str] = None
 
     try:
-        with closing(session) if owns_session else _nullcontext():
+        with closing(session) if owns_session else nullcontext():
             raw_list, meta, feed_status = fetch_source(session)
     except RateLimited as exc:
         apply_rate_limit(data_dir, exc.retry_after)
@@ -581,9 +571,8 @@ def run_once(data_dir: Path, session: Optional[requests.Session] = None,
     atomic_write_json(data_dir / "calendar.latest.json", canonical)
     atomic_write_json(data_dir / "calendar.json", legacy)
     atomic_write_json(data_dir / "calendar.legacy.json", legacy)
-    # [COMPAT-C15] Artefact consommé par l'app committee. Écrit APRÈS les
-    # artefacts historiques : un échec ici ne doit jamais empêcher la
-    # publication du calendrier lui-même.
+    # [COMPAT-C15] Vue committee : écrite APRÈS les artefacts historiques,
+    # un échec ici ne bloque jamais la publication du calendrier.
     try:
         atomic_write_json(data_dir / "calendar.committee.json",
                           to_committee_view(payload, now, legacy))
@@ -598,14 +587,6 @@ def run_once(data_dir: Path, session: Optional[requests.Session] = None,
              (payload.content_hash or "").split(":")[-1][:12],
              (payload.parity_hash or "").split(":")[-1][:12] or "n/a")
     return payload
-
-
-class _nullcontext:
-    def __enter__(self):
-        return None
-
-    def __exit__(self, *exc):
-        return False
 
 
 def emit_seed(data_dir: Path, session: Optional[requests.Session] = None) -> Optional[Path]:

@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 BLUESTAR Calendar Pro — Setup Script
 Generates the seed file needed for Streamlit Cloud deployment.

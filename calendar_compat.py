@@ -1,45 +1,33 @@
 """bluestar calendar_compat -- socle COMMUN macro (calendar_layer.py) / desk
 (calendar_core.py) / committee.
 
-=============================================================================
-RAISON D'ÊTRE
-=============================================================================
-Trois divergences macro/desk ne peuvent pas être résolues par des correctifs
-symétriques dans deux fichiers : elles se re-créent à chaque évolution.
+RAISON D'ÊTRE — trois divergences macro/desk qui ne se corrigent pas
+symétriquement dans deux fichiers : elles se re-créent à chaque évolution.
 
-  [C12/C13] FUSEAU D'AFFICHAGE. macro lisait config.TZ_CET (Europe/Paris),
-            desk codait "Africa/Casablanca". Un opérateur en Tunisie lisait
-            donc deux heures différentes pour le même instant UTC. Ici :
-            résolution UNIQUE, adaptative (système / raccourci pays / env),
-            appliquée en AVAL du canonique — aucun instant UTC, aucun
-            occurrence_id, aucun content_hash n'en dépend.
+  [C12/C13] FUSEAU D'AFFICHAGE : résolution UNIQUE et adaptative (système /
+            raccourci pays / env), appliquée en AVAL du canonique — aucun
+            instant UTC, aucun occurrence_id, aucun content_hash n'en dépend.
+  [C14]     HASH DE PARITÉ : content_hash n'est pas comparable entre apps
+            (hash de VUE calculé APRÈS le filtre de policy, projetant
+            release_group_id qui dépend de la sélection). parity_hash() hashe
+            le périmètre de CONTRAT (HIGH+MEDIUM, avant policy, fenêtre ancrée
+            à l'heure ronde) : deux apps sur le même flux produisent le même
+            hash, quelle que soit leur policy.
+  [C15]     SORTIE COMMITTEE : to_committee_payload() + reconcile() — une
+            structure sans chaînes d'affichage, en UTC pur, angles morts
+            déclarés.
 
-  [C14]     HASH DE PARITÉ. content_hash n'est PAS comparable entre les deux
-            apps : c'est un hash de VUE, calculé APRÈS le filtre de policy
-            (macro HIGH seul, desk HIGH+MEDIUM) et il projette
-            release_group_id, qui dépend de la sélection. parity_hash()
-            hashe le périmètre de CONTRAT (HIGH+MEDIUM, avant policy, fenêtre
-            ancrée à l'heure ronde) : deux apps qui voient le même flux
-            produisent le même parity_hash, quelle que soit leur policy.
-
-  [C15]     SORTIE COMMITTEE. Le committee agrège macro + desk ; il doit lire
-            une structure sans chaînes d'affichage, en UTC pur, avec les
-            angles morts déclarés. to_committee_payload() + reconcile().
-
-=============================================================================
 GARANTIES
-=============================================================================
-* Ce module ne modifie JAMAIS une valeur canonique : il ajoute des clés et
-  réécrit uniquement les champs d'AFFICHAGE (date_display / time_display /
-  datetime_display / display_timezone / day_of_week).
-* Il n'importe ni calendar_layer ni calendar_core (aucune circularité) : il
-  travaille en duck typing sur les lignes legacy et sur les rows normalisées.
-* Aucune I/O réseau, aucun état disque, aucune horloge implicite : now_utc
-  est toujours passé par l'appelant.
+* Ne modifie JAMAIS une valeur canonique : ajoute des clés, ne réécrit que les
+  champs d'AFFICHAGE (date_display / time_display / datetime_display /
+  display_timezone / day_of_week).
+* N'importe ni calendar_layer ni calendar_core (aucune circularité) : duck
+  typing sur les lignes legacy et les rows normalisées.
+* Aucune I/O réseau, aucun état disque, aucune horloge implicite : now_utc est
+  toujours passé par l'appelant.
 
 Kill-switches (production) :
-    BLUESTAR_TZ_AUTO=0    -> désactive la détection système (retour au
-                             comportement historique : env puis fallback).
+    BLUESTAR_TZ_AUTO=0    -> désactive la détection système.
     BLUESTAR_TZ_PIN=0     -> désactive l'épinglage sur le tzdata pip.
     BLUESTAR_DISPLAY_TZ   -> force un fuseau (IANA ou raccourci pays).
 """
