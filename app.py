@@ -92,6 +92,20 @@ class Ingestion:
             self.last_finished_at = time.time()
             self._running = False
 
+    def wait_done(self, timeout: float = 30.0) -> bool:
+        """Attend la fin du cycle en cours. L'UI l'appelle juste après
+        ``kick`` pour que le rerun qui suit serve des octets frais — sans elle,
+        le rerun est immédiat et les boutons de téléchargement embarquent
+        l'artefact d'avant le cycle."""
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._lock:
+                if not self._running:
+                    return True
+            if time.monotonic() >= deadline:
+                return not self._running
+            time.sleep(0.2)
+
 
 @st.cache_resource(show_spinner=False)
 def _new_ingestion() -> Ingestion:
@@ -103,6 +117,31 @@ def _new_ingestion() -> Ingestion:
 
 
 INGESTION = _new_ingestion()
+
+# Messages partagés des boutons « Relancer l'ingestion » et « Scanner ».
+_KICK_MSGS = {
+    "started": ("Cycle lancé.", "ok"),
+    "running": ("Un cycle est déjà en cours.", "warn"),
+    "cooldown": ("Cooldown 429 actif — artefact précédent servi.", "warn"),
+    "disabled": ("Mode lecteur (BLUESTAR_DISABLE_INGEST).", "warn"),
+    "fresh": ("Artefact récent — espacement minimal respecté.", "ok"),
+}
+
+
+def _scan_and_rerun(msg_key: str, *, timeout: float = 30.0) -> None:
+    """Force un cycle d'ingestion, en attend la fin, puis relance la page.
+
+    But : que les boutons de téléchargement servent les octets du cycle qui
+    vient de tourner. Sans attente, le rerun est immédiat et embarque
+    l'artefact précédent — sur Cloud, data/ est reverté à chaque redémarrage
+    du conteneur, donc le téléchargement servirait l'artefact commité (stale)
+    même après une ingestion réussie."""
+    with st.spinner("Rafraîchissement en cours…"):
+        state = INGESTION.kick(force=True)
+        if state in ("started", "running"):
+            INGESTION.wait_done(timeout=timeout)
+    st.session_state[msg_key] = _KICK_MSGS.get(state, (state, "warn"))
+    st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -388,17 +427,7 @@ def render_sidebar(events: List[dict]) -> Filters:
 
         st.markdown("")
         if st.button("Relancer l'ingestion", type="primary", width="stretch"):
-            state = INGESTION.kick(force=True)
-            msgs = {
-                "started": ("Cycle lancé.", "ok"),
-                "running": ("Un cycle est déjà en cours.", "warn"),
-                "cooldown": ("Cooldown 429 actif — artefact précédent servi.", "warn"),
-                "disabled": ("Mode lecteur (BLUESTAR_DISABLE_INGEST).", "warn"),
-                "fresh": ("Artefact récent — espacement minimal respecté.", "ok"),
-            }
-            text, kind = msgs.get(state, (state, "warn"))
-            st.session_state["_kick_msg"] = (text, kind)
-            st.rerun()
+            _scan_and_rerun("_kick_msg")
 
         if msg := st.session_state.pop("_kick_msg", None):
             U.render(U.note(f"<b>{msg[0]}</b>", msg[1]))
@@ -533,6 +562,16 @@ def render_summary() -> None:
 
 
 def render_exports() -> None:
+    # [scanner] « je scan, il me donne le calendrier » : force le cycle, attend
+    # sa fin, puis rerun — les boutons ci-dessous embarquent alors les octets
+    # du cycle. Sans scan, ils servent l'artefact du dernier rerun complet,
+    # qui sur Cloud est l'artefact commité (data/ reverté à chaque restart).
+    if msg := st.session_state.pop("_scan_msg", None):
+        U.render(U.note(f"<b>{msg[0]}</b>", msg[1]))
+    if st.button("\u25b6  Scanner et servir le calendrier frais",
+                 type="primary", width="stretch", key="scan_exports"):
+        _scan_and_rerun("_scan_msg")
+
     can, _ = canonical()
     lg, _ = legacy()
     hp = health()
