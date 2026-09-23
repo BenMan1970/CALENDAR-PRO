@@ -61,18 +61,20 @@ class Ingestion:
         """Retourne l'état : started | running | fresh | cooldown | disabled."""
         if pc.ingest_disabled():
             return "disabled"
-        if self._running:
-            return "running"
-        if pc.is_rate_limited(DATA_DIR):
-            return "cooldown"
-        if not force and CANONICAL_PATH.exists():
-            age = time.time() - CANONICAL_PATH.stat().st_mtime
-            if age < pc.MIN_FETCH_SPACING_S:
-                return "fresh"
 
         with self._lock:
             if self._running:
                 return "running"
+            # Tests disque à l'intérieur du verrou : sans cela, deux sessions
+            # concurrentes passent la garde (cooldown + fraîcheur) en même
+            # temps puis se sérialisent ; si le worker de la première s'achève
+            # dans la fenêtre, la seconde relance un fetch devenu inutile.
+            if pc.is_rate_limited(DATA_DIR):
+                return "cooldown"
+            if not force and CANONICAL_PATH.exists():
+                age = time.time() - CANONICAL_PATH.stat().st_mtime
+                if age < pc.MIN_FETCH_SPACING_S:
+                    return "fresh"
             self._running = True
 
         threading.Thread(target=self._worker, daemon=True, name="bs-ingest").start()
@@ -372,9 +374,12 @@ def render_sidebar(events: List[dict]) -> Filters:
         ccy_pool = sorted({e["currency"] for e in events}) if events else []
         currencies = st.multiselect("Devises", ccy_pool, default=[],
                                     placeholder="Toutes les devises")
+        # Options FIXES : dériver des événements déjà filtrés par la policy
+        # fait planter le multiselect une semaine sans MEDIUM (ou sans HIGH) —
+        # le default réclame alors une option absente (StreamlitAPIException).
         impacts = st.multiselect("Niveaux d'impact",
-                                 sorted({e["impact"] for e in events}) if events else list(IMPACT_LABELS),
-                                 default=["HIGH", "MEDIUM"],
+                                 list(IMPACT_LABELS),
+                                 default=[i for i in ("HIGH", "MEDIUM") if i in IMPACT_LABELS],
                                  placeholder="Tous les niveaux")
         query = st.text_input("Recherche", value="", placeholder="CPI, NFP, rate…")
         horizon = st.slider("Horizon (heures)", 6, 168, 168, step=6)

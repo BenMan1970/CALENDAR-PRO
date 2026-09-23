@@ -36,6 +36,7 @@ Invariants coûteux à régresser (chacun a coûté une mesure en production) :
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -1831,15 +1832,26 @@ def to_legacy_payload(payload: CalendarPayload, now_utc: datetime) -> Dict[str, 
     _augment_contract(_legacy, payload, rows,
                       feed_sha256=dict(payload.source.feed_sha256 or {}),
                       bounds_basis="retained_events")
+    # Toutes les mutations sont terminées : events_engine reçoit ses propres
+    # copies. Le [M5 port] garantit que muter une liste ne corrompt pas l'autre
+    # — vrai pour les listes, faux pour les éléments, partagés volontairement
+    # pour que localize_rows tienne les deux à jour. Sortie byte-identique,
+    # isolation réelle pour le consommateur aval (le merge).
+    _legacy["events_engine"] = copy.deepcopy(_legacy["events_engine"])
     return _legacy
 
 
 def to_committee_view(payload: CalendarPayload, now_utc: datetime,
-                      legacy: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                      legacy: Optional[Dict[str, Any]] = None, *,
+                      module: str = "desk") -> Dict[str, Any]:
     """[COMPAT-C15] Vue machine destinée à l'app committee (UTC pur, aucune
     chaîne localisée). Purement additive : ``to_legacy_payload`` reste le
-    contrat de l'ENGINE et du pipeline de merge."""
+    contrat de l'ENGINE et du pipeline de merge.
+
+    ``module`` : "macro" ou "desk" — le committee réconcilie deux modules
+    distincts. En dur, les deux côtés s'annoncent "desk" et reconcile()
+    compare un artefact avec lui-même."""
     if not _CC_AVAILABLE:                                     # pragma: no cover
         raise RuntimeError("calendar_compat requis pour la vue committee")
     return _CC.to_committee_payload(legacy or to_legacy_payload(payload, now_utc),
-                                    now_utc, module="desk")
+                                    now_utc, module=module)
