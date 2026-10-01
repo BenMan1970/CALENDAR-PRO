@@ -219,16 +219,25 @@ class Ingestion:
             time.sleep(0.2)
 
 
+# Révision de la classe Ingestion : fait partie de la CLÉ du cache_resource.
+# Sans elle, un redéploiement à chaud (même process, code de _new_ingestion
+# inchangé) ressort l'ANCIENNE instance — créée par l'ancienne classe, donc
+# sans les attributs/méthodes ajoutés depuis (AttributeError au rendu).
+# À INCRÉMENTER à chaque modification de la classe Ingestion.
+_INGESTION_REV = "2026-10-01.2"
+
+
 @st.cache_resource(show_spinner=False)
-def _new_ingestion() -> Ingestion:
+def _new_ingestion(rev: str) -> Ingestion:
     """Instance persistante : sans ce cache, elle est réinstanciée à chaque
     rerun complet (filtre sidebar, onglet), ce qui réinitialise ``_running``
     à False et permet à deux run_once() de tourner en parallèle — la garantie
-    « jamais plus d'un fetch concurrent » de la classe ne tient plus."""
+    « jamais plus d'un fetch concurrent » de la classe ne tient plus.
+    ``rev`` ne sert qu'à versionner la clé de cache (voir _INGESTION_REV)."""
     return Ingestion()
 
 
-INGESTION = _new_ingestion()
+INGESTION = _new_ingestion(_INGESTION_REV)
 
 # Messages partagés des boutons « Relancer l'ingestion » et « Scanner ».
 _KICK_MSGS = {
