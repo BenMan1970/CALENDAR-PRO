@@ -41,6 +41,65 @@ IMPACT_LABELS = ("HIGH", "MEDIUM", "LOW", "HOLIDAY", "UNKNOWN")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# ÂGE RÉEL DE L'ARTEFACT (contenu, pas mtime)
+# ═══════════════════════════════════════════════════════════════════════════
+# Le mtime d'un fichier ne dit rien de la fraîcheur de ses DONNÉES : sur Cloud,
+# le checkout git / la restauration du conteneur donne à calendar.latest.json
+# un mtime « maintenant » alors que son contenu date de plusieurs jours. Avec
+# un garde-fou basé sur le mtime, le premier cycle est repoussé de
+# MIN_FETCH_SPACING_S et l'écran sert des données périmées pendant ce temps.
+# La source de vérité est donc l'horodatage du fetch écrit DANS l'artefact.
+_CLOCK_SKEW_TOLERANCE_S = 300.0
+_FETCHED_MEMO: Dict[Tuple[int, int], Optional[float]] = {}
+
+
+def _parse_utc_epoch(raw: Any) -> Optional[float]:
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.timestamp()
+
+
+def _artifact_fetched_epoch() -> Optional[float]:
+    """Epoch du dernier fetch réussi, lu dans l'artefact canonique (mémoïsé par
+    (mtime_ns, size) : une relecture disque seulement quand le fichier change).
+    None = inconnu (fichier absent/illisible) → traité comme « à rafraîchir »."""
+    key = _stats(CANONICAL_PATH)
+    if key == (0, 0):
+        return None
+    if key in _FETCHED_MEMO:
+        return _FETCHED_MEMO[key]
+    data = pc.read_json(CANONICAL_PATH)
+    epoch: Optional[float] = None
+    if isinstance(data, dict):
+        src = data.get("source") if isinstance(data.get("source"), dict) else {}
+        epoch = (_parse_utc_epoch(src.get("fetched_at_utc"))
+                 or _parse_utc_epoch(data.get("generated_at_utc")))
+    if len(_FETCHED_MEMO) > 8:
+        _FETCHED_MEMO.clear()
+    _FETCHED_MEMO[key] = epoch
+    return epoch
+
+
+def artifact_age_s() -> Optional[float]:
+    """Âge (s) des données servies, None si inconnu. Un horodatage trop loin
+    dans le futur (horloge incohérente) est traité comme inconnu."""
+    epoch = _artifact_fetched_epoch()
+    if epoch is None:
+        return None
+    age = time.time() - epoch
+    return None if age < -_CLOCK_SKEW_TOLERANCE_S else max(0.0, age)
+
+
+def _artifact_is_fresh() -> bool:
+    age = artifact_age_s()
+    return age is not None and age < pc.MIN_FETCH_SPACING_S
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # INGESTION DE FOND (non bloquante, une seule à la fois par process)
 # ═══════════════════════════════════════════════════════════════════════════
 class Ingestion:
@@ -71,10 +130,8 @@ class Ingestion:
             # dans la fenêtre, la seconde relance un fetch devenu inutile.
             if pc.is_rate_limited(DATA_DIR):
                 return "cooldown"
-            if not force and CANONICAL_PATH.exists():
-                age = time.time() - CANONICAL_PATH.stat().st_mtime
-                if age < pc.MIN_FETCH_SPACING_S:
-                    return "fresh"
+            if not force and CANONICAL_PATH.exists() and _artifact_is_fresh():
+                return "fresh"
             self._running = True
 
         threading.Thread(target=self._worker, daemon=True, name="bs-ingest").start()
@@ -156,7 +213,7 @@ def _load_refresh_due() -> bool:
     cycle en cours à l'ouverture de la page ?"""
     if pc.ingest_disabled() or not CANONICAL_PATH.exists():
         return False
-    return (time.time() - CANONICAL_PATH.stat().st_mtime) > pc.MIN_FETCH_SPACING_S
+    return not _artifact_is_fresh()
 
 # ═══════════════════════════════════════════════════════════════════════════
 # CHARGEMENT (cache invalidé par les stats fichier)
@@ -250,6 +307,15 @@ def _fmt_delta(hours: float) -> str:
     return body if hours > 0 else f"−{body}"
 
 
+def _raw_of(node: Any) -> Any:
+    """Valeur brute d'un champ numérique canonique ({"raw": …}). Tolère un
+    ancien schéma où le champ est déjà un scalaire : un artefact/seed périmé ne
+    doit jamais lever d'exception dans le rendu."""
+    if isinstance(node, dict):
+        return node.get("raw")
+    return node if node not in ("", None) else None
+
+
 def enrich_events(payload: Optional[dict], now: datetime) -> List[dict]:
     """Aplati le payload canonique en lignes de VUE. Le time_context stocké
     dans l'artefact est daté de l'ingestion : les countdowns sont TOUJOURS
@@ -257,7 +323,9 @@ def enrich_events(payload: Optional[dict], now: datetime) -> List[dict]:
     if not payload:
         return []
     out: List[dict] = []
-    for ev in payload.get("events", []):
+    for ev in (payload.get("events") or []):
+        if not isinstance(ev, dict):
+            continue
         raw_dt = ev.get("scheduled_at_utc") or ""
         try:
             dt_utc = datetime.fromisoformat(str(raw_dt).replace("Z", "+00:00"))
@@ -277,9 +345,9 @@ def enrich_events(payload: Optional[dict], now: datetime) -> List[dict]:
             "tz_label": (ev.get("display_timezone") or "UTC").split("/")[-1].replace("_", " "),
             "date_display": ev.get("date_display") or dt_utc.strftime("%Y-%m-%d"),
             "day_of_week": (ev.get("day_of_week") or "").title(),
-            "forecast": (ev.get("forecast") or {}).get("raw"),
-            "previous": (ev.get("previous") or {}).get("raw"),
-            "actual": (ev.get("actual") or {}).get("raw"),
+            "forecast": _raw_of(ev.get("forecast")),
+            "previous": _raw_of(ev.get("previous")),
+            "actual": _raw_of(ev.get("actual")),
             "actual_status": ev.get("actual_status"),
             "hours_until": round(hours, 4),
             "countdown": _fmt_delta(hours),
@@ -321,6 +389,9 @@ def serving_state(payload: Optional[dict], is_seed: bool) -> Tuple[str, str, boo
     if is_seed:
         return "SEED · COLD START", U.WARN, False
     if payload:
+        age = artifact_age_s()
+        if age is not None and age > pc.DEFAULT_POLICY.max_source_age_seconds:
+            return "PÉRIMÉ · RAFRAÎCHISSEMENT", U.WARN, False
         return "LIVE", U.OK, True
     return "INDISPONIBLE", U.BAD, False
 
@@ -421,8 +492,14 @@ def render_live_strip() -> None:
             or payload.get("generated_at_utc")) if payload else None
     if _fid:
         _prev = st.session_state.get("_served_fid")
-        st.session_state["_served_fid"] = _fid
-        if _prev and _prev != _fid:
+        if not _prev:
+            st.session_state["_served_fid"] = _fid
+        elif _prev != _fid and not INGESTION.running:
+            # Le canonique est écrit AVANT calendar.json / health.json : on ne
+            # relance qu'une fois le cycle terminé, sinon l'onglet Export/Résumé
+            # embarquerait un legacy encore périmé sans second rerun pour le
+            # corriger (l'identifiant servi serait déjà mémorisé).
+            st.session_state["_served_fid"] = _fid
             st.rerun()
 
 
@@ -777,4 +854,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
