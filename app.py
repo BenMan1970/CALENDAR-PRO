@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
+from html import escape as escape_html
 
 import pipeline_calendar as pc
 import ui as U
@@ -102,15 +103,42 @@ def _artifact_is_fresh() -> bool:
 # ═══════════════════════════════════════════════════════════════════════════
 # INGESTION DE FOND (non bloquante, une seule à la fois par process)
 # ═══════════════════════════════════════════════════════════════════════════
+# Codes d'échec TRANSITOIRES (réseau / HTTP / JSON tronqué par un CDN) : seuls
+# ceux-là méritent un nouvel essai immédiat. QUALITY_INVALID, NORMALIZATION_*,
+# RATE_LIMIT_* et INGEST_DISABLED sont déterministes : on ne les rejoue pas.
+_TRANSIENT_CODES = frozenset({
+    "NETWORK_ERROR", "NETWORK_TIMEOUT", "HTTP_ERROR",
+    "FETCH_DEADLINE_EXCEEDED", "ALL_SOURCES_FAILED", "INVALID_JSON",
+})
+_QUICK_RETRY_DELAYS_S = (2.0,)               # dans le cycle : ouverture de page
+_BACKOFF_S = (10.0, 30.0, 60.0, 120.0)      # entre cycles : jamais de martelage
+_NO_ERROR_CODES = frozenset({"RATE_LIMIT_COOLDOWN", "INGEST_DISABLED"})
+
+
+def _cycle_error(since_epoch: float) -> Optional[str]:
+    """Erreur écrite par run_once pour CE cycle (health.json), None si absente
+    ou antérieure au cycle (jamais d'erreur périmée attribuée au cycle)."""
+    hp = pc.read_json(HEALTH_PATH)
+    if not isinstance(hp, dict) or not hp.get("error"):
+        return None
+    ts = _parse_utc_epoch(hp.get("checked_at_utc"))
+    if ts is None or ts < since_epoch - 1.0:
+        return None
+    return str(hp["error"])
+
+
 class Ingestion:
     """Superviseur d'ingestion : jamais plus d'un fetch concurrent, jamais de
-    fetch pendant le cooldown 429, jamais de fetch en mode lecteur."""
+    fetch pendant le cooldown 429, jamais de fetch en mode lecteur ; un échec
+    transitoire est rejoué vite (cycle) puis espacé (backoff borné)."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._running = False
         self.last_error: Optional[str] = None
         self.last_finished_at: Optional[float] = None
+        self.fail_streak = 0
+        self.next_attempt_at = 0.0
 
     @property
     def running(self) -> bool:
@@ -132,6 +160,8 @@ class Ingestion:
                 return "cooldown"
             if not force and CANONICAL_PATH.exists() and _artifact_is_fresh():
                 return "fresh"
+            if not force and time.time() < self.next_attempt_at:
+                return "backoff"
             self._running = True
 
         threading.Thread(target=self._worker, daemon=True, name="bs-ingest").start()
@@ -139,12 +169,37 @@ class Ingestion:
 
     def _worker(self) -> None:
         try:
-            # [B4] session HTTP jetable par cycle : pas de pool partagé entre
-            # threads Streamlit (sockets recyclés à froid = 429 fantômes).
-            pc.run_once(DATA_DIR, session=None)
-            self.last_error = None
+            attempt = 0
+            while True:
+                started = time.time()
+                # [B4] session HTTP jetable par cycle : pas de pool partagé
+                # entre threads Streamlit (sockets recyclés à froid = 429
+                # fantômes).
+                payload = pc.run_once(DATA_DIR, session=None)
+                if payload is not None:
+                    self.last_error = None
+                    self.fail_streak = 0
+                    self.next_attempt_at = 0.0
+                    break
+                err = _cycle_error(started)
+                code = (err or "").split(":", 1)[0]
+                if code in _NO_ERROR_CODES or pc.ingest_disabled() \
+                        or pc.is_rate_limited(DATA_DIR):
+                    break                         # pas un échec : rien à rejouer
+                self.last_error = err or "NO_DATA"
+                if code in _TRANSIENT_CODES and attempt < len(_QUICK_RETRY_DELAYS_S):
+                    time.sleep(_QUICK_RETRY_DELAYS_S[attempt])
+                    attempt += 1
+                    continue
+                self.fail_streak += 1
+                self.next_attempt_at = time.time() + _BACKOFF_S[
+                    min(self.fail_streak, len(_BACKOFF_S)) - 1]
+                break
         except Exception as exc:                              # noqa: BLE001
             self.last_error = f"{type(exc).__name__}: {exc}"
+            self.fail_streak += 1
+            self.next_attempt_at = time.time() + _BACKOFF_S[
+                min(self.fail_streak, len(_BACKOFF_S)) - 1]
         finally:
             self.last_finished_at = time.time()
             self._running = False
@@ -182,6 +237,7 @@ _KICK_MSGS = {
     "cooldown": ("Cooldown 429 actif — artefact précédent servi.", "warn"),
     "disabled": ("Mode lecteur (BLUESTAR_DISABLE_INGEST).", "warn"),
     "fresh": ("Artefact récent — espacement minimal respecté.", "ok"),
+    "backoff": ("Nouvelle tentative programmée — échec récent de la source.", "warn"),
 }
 
 
@@ -482,25 +538,66 @@ def render_live_strip() -> None:
             "l'onglet Diagnostics.",
             "warn" if status != "INVALID" else "bad"))
 
-    # [refresh auto] Un artefact plus frais que celui servi au dernier rerun
-    # complet vient d'arriver (cycle de fond ou scan lancé d'un autre onglet) :
-    # un seul rerun global pour que les téléchargements de l'onglet Export
-    # embarquent les octets frais — sans lui, ils serviraient l'artefact
-    # précédent. Le premier passage se contente de mémoriser l'identifiant
-    # servi (pas de rerun à froid).
-    _fid = (src.get("fetched_at_utc")
-            or payload.get("generated_at_utc")) if payload else None
-    if _fid:
-        _prev = st.session_state.get("_served_fid")
-        if not _prev:
-            st.session_state["_served_fid"] = _fid
-        elif _prev != _fid and not INGESTION.running:
-            # Le canonique est écrit AVANT calendar.json / health.json : on ne
-            # relance qu'une fois le cycle terminé, sinon l'onglet Export/Résumé
-            # embarquerait un legacy encore périmé sans second rerun pour le
-            # corriger (l'identifiant servi serait déjà mémorisé).
-            st.session_state["_served_fid"] = _fid
-            st.rerun()
+    # [refresh auto] voir _sync_served_fid (rerun global après fin de cycle).
+    _sync_served_fid(payload)
+
+
+def _sync_served_fid(payload: Optional[dict]) -> None:
+    """Rerun global unique quand un artefact plus frais que celui servi arrive
+    (cycle de fond ou scan d'un autre onglet), UNE FOIS le cycle terminé.
+    Le premier passage mémorise l'identifiant servi (pas de rerun à froid)."""
+    if not payload:
+        return
+    src = payload.get("source", {}) or {}
+    fid = src.get("fetched_at_utc") or payload.get("generated_at_utc")
+    if not fid:
+        return
+    prev = st.session_state.get("_served_fid")
+    if not prev:
+        st.session_state["_served_fid"] = fid
+    elif prev != fid and not INGESTION.running:
+        st.session_state["_served_fid"] = fid
+        st.rerun()
+
+
+def _needs_fast_poll() -> bool:
+    """Cycle en cours, ou artefact périmé alors qu'un fetch est permis :
+    on surveille à 3 s (lecture fichier seule) au lieu de 20 s."""
+    if pc.ingest_disabled():
+        return False
+    if INGESTION.running:
+        return True
+    if pc.is_rate_limited(DATA_DIR):
+        return False
+    return not CANONICAL_PATH.exists() or not _artifact_is_fresh()
+
+
+def _watcher_body() -> None:
+    """Veilleur de reprise : à chaque passe il relance un cycle si le backoff
+    l'autorise, explique l'état (raison de l'échec, prochaine tentative) et
+    déclenche le rerun global dès que l'artefact frais est publié — sans
+    attendre le tick de 20 s du bandeau."""
+    INGESTION.kick()
+    payload, _ = canonical()
+    _sync_served_fid(payload)
+    age = artifact_age_s()
+    if age is not None and age < pc.MIN_FETCH_SPACING_S:
+        return
+    if INGESTION.running:
+        U.render(U.note("<b>Rafraîchissement en cours…</b> la vue affichée "
+                        "est le dernier artefact disponible.", "warn"))
+    elif INGESTION.last_error:
+        wait = max(0, int(INGESTION.next_attempt_at - time.time()))
+        U.render(U.note(
+            f"<b>Dernier cycle en échec.</b> <code>{escape_html(INGESTION.last_error[:160])}</code>"
+            f" — nouvelle tentative dans {wait}s.", "bad"))
+
+
+def render_watcher() -> None:
+    # run_every est fixé à la déclaration : choisi à chaque rerun COMPLET.
+    # Aucun timer quand tout est frais (le bandeau de 20 s suffit).
+    if _needs_fast_poll():
+        st.fragment(run_every=3)(_watcher_body)()
 
 
 def render_sidebar(events: List[dict]) -> Filters:
@@ -734,6 +831,7 @@ def render_diagnostics() -> None:
             ("ingestion en cours", INGESTION.running),
             ("mode lecteur", pc.ingest_disabled()),
             ("dernière erreur UI", INGESTION.last_error),
+            ("échecs consécutifs", INGESTION.fail_streak),
             ("cooldown 429 actif", pc.is_rate_limited(DATA_DIR)),
             ("cooldown jusqu'à", rl.get("blocked_until_utc")),
             ("espacement min", f"{pc.MIN_FETCH_SPACING_S}s"),
@@ -817,6 +915,7 @@ def main() -> None:
     filters = render_sidebar(all_events)
     render_hero(payload, is_seed)
     render_live_strip()
+    render_watcher()
     st.markdown("")
 
     view = apply_filters(all_events, filters, now)
