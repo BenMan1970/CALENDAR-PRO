@@ -315,9 +315,16 @@ def _fetch_with_deadline(session: requests.Session, url: str,
     outcome: Dict[str, Any] = {}
 
     def _worker():
+        # [AUDIT-F1] ``except BaseException`` capturait aussi KeyboardInterrupt
+        # et SystemExit, qui etaient ensuite RE-LEVES dans le thread principal
+        # (``raise outcome["error"]``). Un signal recu pendant le fetch tuait
+        # donc le cycle hors de tout ``except FetchError``/``RateLimited`` :
+        # run_once ne rattrape que ces deux classes, l'exception remontait
+        # jusqu'au CLI. On capture ``Exception`` (les erreurs reseau et de
+        # parsing), et on laisse les signaux suivre leur cours normal.
         try:
             outcome["value"] = _fetch_blocking(session, url, deadline_s)
-        except BaseException as exc:                          # noqa: BLE001
+        except Exception as exc:                              # noqa: BLE001
             outcome["error"] = exc
 
     th = threading.Thread(target=_worker, daemon=True, name="pipeline-fetch")
@@ -330,7 +337,23 @@ def _fetch_with_deadline(session: requests.Session, url: str,
                          f">{deadline_s:.0f}s (worker abandonné à "
                          f"{time.monotonic() - started:.0f}s)")
     if "error" in outcome:
-        raise outcome["error"]
+        error = outcome["error"]
+        # [AUDIT-F1b] Une exception non prevue ne doit pas remonter brute :
+        # run_once ne rattrape que FetchError/RateLimited, donc elle ferait
+        # echouer le cycle SANS que l'artefact existant soit preserve ni que
+        # health.json soit ecrit. On l'enveloppe pour que le cycle se termine
+        # proprement (artefact intact, raison tracee).
+        if not isinstance(error, (FetchError, RateLimited)):
+            raise FetchError("UNEXPECTED_FETCH_ERROR",
+                             f"{type(error).__name__}: {error}") from error
+        raise error
+    if "value" not in outcome:
+        # [AUDIT-F1c] Ni resultat ni erreur : le worker a ete interrompu par un
+        # signal (KeyboardInterrupt/SystemExit), qui n'est plus capture depuis
+        # F1. Sans ce garde-fou, ``outcome["value"]`` levait un KeyError nu,
+        # absurde a diagnostiquer et hors du contrat FetchError.
+        raise FetchError("FETCH_INTERRUPTED",
+                         "worker interrompu avant de rendre un resultat")
     return outcome["value"]
 
 
@@ -695,7 +718,8 @@ def _archive_raw(data_dir: Path, raw_by_feed: Dict[str, bytes], now: datetime) -
 
 
 def run_once(data_dir: Path, session: Optional[requests.Session] = None,
-             policy: Optional[SelectionPolicy] = None) -> Optional[CalendarPayload]:
+             policy: Optional[SelectionPolicy] = None,
+             force: bool = False) -> Optional[CalendarPayload]:
     """
     Cycle unique : fetch → normalize → écriture des artefacts.
 
@@ -723,6 +747,25 @@ def run_once(data_dir: Path, session: Optional[requests.Session] = None,
         write_health(data_dir, now, None, "RATE_LIMIT_COOLDOWN",
                      rate_limited=True, mode="cooldown")
         return None
+
+    # [AUDIT-F2] PLANCHER ANTI-429 APPLIQUÉ PAR L'INGESTEUR LUI-MÊME.
+    #
+    # Le plancher n'existait que dans app.py (bouton « Relancer l'ingestion »)
+    # et setup.py. ``run_once`` — le seul composant qui parle réellement à la
+    # source — n'en tenait aucun compte : cinq appels consécutifs émettaient
+    # cinq GET en quelques millisecondes. C'était la cause racine STRUCTURELLE
+    # des 429, et ``--loop --interval 30`` la déclenchait directement.
+    #
+    # Le plancher est PERSISTÉ (last_attempt.json) : il tient donc entre
+    # processus, threads et redémarrages de conteneur. ``force=True`` autorise
+    # l'exploitant à l'outrepasser explicitement, jamais par accident.
+    if not force:
+        remaining = fetch_floor_remaining(data_dir, now)
+        if remaining > 0:
+            LOG.info("fetch floor active — %.0fs remaining, artifact served as-is",
+                     remaining)
+            write_health(data_dir, now, None, "FETCH_FLOOR_ACTIVE", mode="floor")
+            return None
 
     owns_session = session is None
     session = session or build_session()
@@ -945,6 +988,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--seed", action="store_true", help="génère le seed de cold-start")
     parser.add_argument("--clear-cooldown", action="store_true",
                         help="supprime rate_limit.json puis sort")
+    parser.add_argument("--force", action="store_true",
+                        help="outrepasse le plancher anti-429 (usage explicite)")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
 
@@ -977,15 +1022,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         signal.signal(signal.SIGINT, _signal)
         signal.signal(signal.SIGTERM, _signal)
 
-        LOG.info("entering loop mode, interval=%ds", args.interval)
+        LOG.info("entering loop mode, interval=%ds (floor=%ds)",
+                 args.interval, FETCH_FLOOR_S)
         while True:
             try:
-                run_once(data_dir)
+                run_once(data_dir, force=args.force)
             except Exception:                                 # noqa: BLE001
                 LOG.exception("unhandled error in cycle")
             time.sleep(max(5, args.interval))
 
-    result = run_once(data_dir)
+    result = run_once(data_dir, force=args.force)
     if result is not None:
         return 0
     # [B3] exit 3 = « rien publié mais rien de cassé » (cooldown/mode lecteur),

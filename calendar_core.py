@@ -659,10 +659,35 @@ class SourceInfo(BaseModel):
 
 
 class QualityInfo(BaseModel):
+    """Verdict de qualité, calculé par l'INGESTEUR.
+
+    [AUDIT-H3] ``is_stale`` et ``source_age_seconds`` sont des INSTANTANÉS, pas
+    des propriétés vivantes. Ils décrivent l'état au moment où l'ingesteur a
+    écrit l'artefact — où l'âge vaut par construction ~0 s, donc ``is_stale``
+    est presque toujours False DANS LE FICHIER.
+
+    Un consommateur qui relit ce JSON plusieurs heures plus tard et se fie à
+    ``is_stale`` lit donc un verdict périmé : un artefact de 6 h 30 peut
+    afficher ``source_age_seconds: 0`` et ``is_stale: False``.
+
+    L'âge VIVANT se recalcule, il ne se lit pas :
+      • ``pipeline_calendar._served_artifact_facts()`` et ``health.json``
+        exposent ``served_artifact_age_s`` recalculé à chaque cycle ;
+      • ``trading_export.build_export()`` recalcule ``artifact_age_s`` et
+        ``is_stale`` à l'export, et REFUSE de publier au-delà du seuil ;
+      • l'UI recalcule via ``app.artifact_age_s()``.
+
+    Le champ est conservé tel quel (contrat inter-apps : le retirer ou le
+    redéfinir ferait bouger les hash). C'est un choix de LECTURE, désormais
+    documenté plutôt que silencieux.
+    """
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     status: QualityStatus
+    #: Instantané à l'ingestion — voir la note [AUDIT-H3] ci-dessus.
     is_stale: bool
+    #: Instantané à l'ingestion (≈0 à l'écriture) — voir [AUDIT-H3].
     source_age_seconds: int
     raw_event_count: int
     accepted_event_count: int
@@ -676,6 +701,23 @@ class QualityInfo(BaseModel):
     # ND-013 : horizon court CAUSÉ par le flux semaine suivante non publié =
     # état structurel neutre (flag méta + note), plus un signal d'alerte.
     week_rollover_pending: bool = False
+    #: [AUDIT-H5] Pourquoi ``raw_event_count`` et ``accepted_event_count``
+    #: different. Le flux brut contient TOUTES les lignes (y compris Low et
+    #: hors fenetre) ; le payload ne publie que la selection. Sur l'artefact
+    #: reel : 111 lignes brutes -> 25 retenues, et rien n'expliquait l'ecart.
+    #:
+    #: Avant ce champ, un desk ne pouvait pas distinguer :
+    #:   * « semaine calme, peu de High »            (normal) ;
+    #:   * « le flux a change de vocabulaire »       (alerte) ;
+    #:   * « la devise a change de format »          (alerte).
+    #: Or c'est exactement la confusion qui a produit le bug « calendrier vide
+    #: note VALID 1.000 ». Le compteur etait DEJA calcule (variable ``drop``)
+    #: mais n'etait emis que si la selection etait TOTALEMENT vide — donc
+    #: jamais dans le cas reel.
+    #:
+    #: Champ ADDITIF et optionnel : absent des projections de hash, il ne peut
+    #: pas deplacer ``content_hash`` / ``parity_hash`` / ``high_content_hash``.
+    selection_funnel: Optional[Dict[str, int]] = None
 
 
 class CoverageInfo(BaseModel):
@@ -1078,6 +1120,19 @@ def build_payload(
             continue
         seen[row["occurrence_id"]] = row
     selected = list(seen.values())
+
+    # [AUDIT-H5] Entonnoir PUBLIE des qu'il y a eu des ecarts, et non plus
+    # seulement quand la selection est totalement vide : dans le cas reel
+    # (111 lignes brutes -> 25 retenues) l'ancien garde `not selected` etait
+    # faux, donc le compteur etait calcule puis JETE. Un ecart inexplique
+    # entre le flux brut et l'artefact est exactement ce qu'un desk doit
+    # pouvoir auditer. Place APRES la deduplication, sinon `duplicates`
+    # vaudrait toujours 0.
+    # [AUDIT-H5] PAS de warning ici, decision du proprietaire : la liste
+    # `warnings` fait partie du contrat legacy (l'app macro peut la comparer),
+    # donc y ajouter une entree est un changement de contrat. L'information
+    # est exposee par `selection_funnel`, ou elle est exploitable sans rien
+    # casser. L'ancien warning SELECTION_EMPTY reste, lui, tel quel.
     if duplicates:
         warnings.append(f"DUPLICATE_OCCURRENCES_DROPPED:{duplicates}")
 
@@ -1116,10 +1171,12 @@ def build_payload(
         warnings.append("ALL_SOURCE_EVENTS_IN_THE_PAST_WEEK_ROLLOVER_PENDING")
     if coverage_start is not None and coverage_start > now_utc + timedelta(days=9):
         warnings.append("SOURCE_COVERAGE_STARTS_TOO_FAR_IN_FUTURE")
-    if coverage_end is not None and coverage_end > now_utc:
-        horizon_useful_h = (coverage_end - now_utc).total_seconds() / 3600.0
-    else:
-        horizon_useful_h = None
+    # [AUDIT-H4] `horizon_useful_h` a ete SUPPRIME ici : la variable etait
+    # calculee dans les deux branches d'un if/else puis JAMAIS lue (detecte par
+    # pyflakes). Elle a ete remplacee par `horizon_events_h` (plus bas), qui
+    # mesure l'horizon des evenements RETENUS et non de toutes les lignes
+    # brutes. Code mort sans effet de bord : le retirer ne change aucun
+    # artefact, ce que les tests de hash confirment.
     # F-2 : troncature INTRA-hebdomadaire — la couverture qui compte est celle
         # des événements RETENUS (l'aval lit data_coverage_end_utc = max(events)) ;
         # baser le warning sur max(rows) le faisait sonner ~24 h trop tard. Repli
@@ -1184,6 +1241,12 @@ def build_payload(
     else:
         status = QualityStatus.VALID
 
+    # [AUDIT-H5] Entonnoir publie : construit ICI car il a besoin de `events`
+    # (defini plus haut) ET de `duplicates`. Place juste avant QualityInfo
+    # pour que toutes ses dependances soient resolues.
+    _funnel = {"normalized": len(rows), "duplicates": duplicates,
+               "accepted": len(events), **drop}
+
     quality = QualityInfo(
         status=status,
         week_rollover_pending=rollover_pending,
@@ -1198,6 +1261,7 @@ def build_payload(
         data_quality_score=score,
         warnings=tuple(warnings),
         rejections=tuple(rejections[:50]),
+        selection_funnel=_funnel,                        # [AUDIT-H5]
     )
 
     payload = CalendarPayload(
@@ -1335,14 +1399,37 @@ def canonical_content_hash(payload: CalendarPayload) -> str:
     """[F5 port] SHA-256 d'une PROJECTION ÉCONOMIQUE explicite.
 
     Insensible à : fuseau d'affichage, jour en toutes lettres (locale),
-    index d'origine dans le flux, sessions/centres actifs (dérivables de
-    l'UTC), champs de vue (time_context, priority…), métadonnées de qualité
-    et de source. Avant ce port, changer DEFAULT_DISPLAY_TZ ou l'ordre de
-    fusion faisait bouger le hash — « les deux apps voient le même
-    calendrier » était invérifiable. La liste des 10 champs est la copie
-    exacte de la projection du calendar_layer macro (l. canonical_content_
-    hash, v6.2 sha 2e4bf033a0c6) ; la stabilité inter-apps du BRUT reste
-    ``source.payload_sha256``.
+    sessions/centres actifs (dérivables de l'UTC), champs de vue
+    (time_context, priority…), métadonnées de qualité et de source. Avant ce
+    port, changer DEFAULT_DISPLAY_TZ ou l'ordre de fusion faisait bouger le
+    hash — « les deux apps voient le même calendrier » était invérifiable.
+    La liste des 10 champs est la copie exacte de la projection du
+    calendar_layer macro (l. canonical_content_hash, v6.2 sha 2e4bf033a0c6) ;
+    la stabilité inter-apps du BRUT reste ``source.payload_sha256``.
+
+    [AUDIT-H1] PORTÉE EXACTE DE L'INVARIANCE À L'ORDRE — précisée, pas
+    modifiée (la formule est un contrat inter-apps : y toucher casserait la
+    parité). Cette fonction, PRISE SEULE, est SENSIBLE À L'ORDRE de
+    ``payload.events`` : la projection est une liste et ``json.dumps`` en
+    préserve l'ordre. Deux payloads économiquement identiques mais ordonnés
+    différemment produisent donc deux hash différents (vérifié : ordre
+    inversé -> hash différent).
+
+    Cette sensibilité est INATTEIGNABLE par les chemins normaux, et c'est
+    pourquoi elle est acceptable :
+      • ``build_payload`` trie par (scheduled_at_utc, currency, name) AVANT de
+        hacher, donc l'ordre du FLUX D'ENTRÉE n'a aucun effet (vérifié :
+        6 permutations du flux d'entrée -> 1 seul hash) ;
+      • le validateur de ``CalendarPayload`` REJETTE un payload désordonné
+        (``events must be sorted by scheduled_at_utc``), donc un payload
+        désordonné ne peut pas exister ;
+      • ``build_payload`` n'applique pas ``canonical_content_hash`` : il ne
+        peut pas hacher un ordre non trié.
+
+    La conséquence pratique est donc nulle, mais l'affirmation « insensible à
+    l'index d'origine » ne doit pas être lue comme une propriété de CETTE
+    fonction : elle vient de ses appelants. Un futur appelant qui hacherait
+    directement une liste non triée produirait un hash instable.
     """
     projection = [
         {

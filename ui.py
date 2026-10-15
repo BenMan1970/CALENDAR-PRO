@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections import Counter, OrderedDict
 from html import escape
-from typing import Any, Dict, Iterable, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
 import streamlit as st
 
@@ -554,7 +554,18 @@ def density_by_day(events: Sequence[dict], height: int = 210):
         return None
     days: "OrderedDict[str, Counter]" = OrderedDict()
     for e in sorted(events, key=lambda x: x["dt_utc"]):
-        days.setdefault(e["date_display"], Counter())[(e["impact"] or "UNKNOWN").upper()] += 1
+        # [AUDIT-S2] ``date_display`` est toujours une chaine via
+        # enrich_events (strftime), donc None est inatteignable AUJOURD'HUI.
+        # Mais ce builder est public et documente comme acceptant des
+        # « events » : un appelant futur qui construirait ses lignes a la main
+        # faisait planter la page sur un TypeError (len(None)) au lieu de
+        # degrader proprement. On derive la cle de dt_utc, qui est toujours
+        # presente puisqu'elle sert deja au tri.
+        key = e.get("date_display")
+        if not isinstance(key, str) or not key:
+            dt = e.get("dt_utc")
+            key = dt.strftime("%Y-%m-%d") if hasattr(dt, "strftime") else "?"
+        days.setdefault(key, Counter())[(e["impact"] or "UNKNOWN").upper()] += 1
 
     labels = list(days)
     short = [l[5:] if len(l) >= 10 else l for l in labels]      # MM-DD

@@ -19,7 +19,7 @@ import json
 import os
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape as escape_html
 from pathlib import Path
@@ -41,6 +41,10 @@ CANONICAL_PATH = DATA_DIR / "calendar.latest.json"
 LEGACY_PATH = DATA_DIR / "calendar.json"
 HEALTH_PATH = DATA_DIR / "health.json"
 SEED_PATH = DATA_DIR / "seed" / "calendar.latest.seed.json"
+# [AUDIT-F3] Artefacts egalement publies par l'ingesteur, exposes au
+# telechargement depuis l'onglet Export.
+COMMITTEE_PATH = DATA_DIR / "calendar.committee.json"
+EXPORT_PATH = DATA_DIR / "trading_export.json"
 
 IMPACT_LABELS = ("HIGH", "MEDIUM", "LOW", "HOLIDAY", "UNKNOWN")
 
@@ -144,7 +148,17 @@ _QUICK_RETRY_DELAYS_S: tuple = ()
 # échelle (10/30/60/120 s) rejouait un échec DÉTERMINISTE (QUALITY_INVALID,
 # NORMALIZATION_FAILED) toutes les 2 minutes indéfiniment.
 _BACKOFF_S = (300.0, 600.0, 1200.0, 1800.0, 3600.0)
-_NO_ERROR_CODES = frozenset({"RATE_LIMIT_COOLDOWN", "INGEST_DISABLED"})
+# [AUDIT-F2b] Codes qui ne sont PAS des pannes : le cycle s'est terminé
+# normalement, il n'a simplement rien eu à publier. ``FETCH_FLOOR_ACTIVE``
+# appartient à cette famille au même titre que le cooldown — sans quoi un
+# plancher respecté était compté comme un échec, déclenchait un backoff
+# 300 s -> 3600 s et affichait un bandeau d'erreur rouge à l'utilisateur
+# alors que le système fonctionnait exactement comme prévu.
+_NO_ERROR_CODES = frozenset({
+    "RATE_LIMIT_COOLDOWN",
+    "INGEST_DISABLED",
+    "FETCH_FLOOR_ACTIVE",
+})
 
 
 def _cycle_error(since_epoch: float) -> Optional[str]:
@@ -281,7 +295,17 @@ class Ingestion:
             # [B4] session HTTP jetable par cycle : pas de pool partagé
             # entre threads Streamlit (sockets recyclés à froid = 429
             # fantômes).
-            payload = pc.run_once(DATA_DIR, session=None)
+            #
+            # [AUDIT-F2c] ``force=True`` est INDISPENSABLE ici : ``kick()``
+            # vient de vérifier le plancher SOUS VERROU et d'appeler
+            # ``record_attempt()`` pour le réserver. Sans ce drapeau, le
+            # ``fetch_floor_remaining()`` de run_once relisait le plancher que
+            # kick venait d'écrire et abandonnait le cycle : l'app aurait cessé
+            # de fetcher définitivement. Le plancher est bien appliqué une fois,
+            # par kick() ; run_once est ici l'exécutant d'une décision déjà
+            # prise. Les appelants directs (CLI, cron) n'ont pas de kick et
+            # restent protégés par le défaut force=False.
+            payload = pc.run_once(DATA_DIR, session=None, force=True)
             if payload is not None:
                 with self._lock:
                     self._last_error = None
@@ -435,6 +459,21 @@ def legacy() -> Tuple[Optional[dict], bool]:
 
 def health() -> Optional[dict]:
     return load_health(*_stats(HEALTH_PATH))
+
+
+def _load_export_tab_inputs() -> Tuple[Optional[dict], Optional[dict], Optional[dict]]:
+    """(committee, trading_export, health) lus depuis le disque.
+
+    [AUDIT-F3] Ces artefacts sont ecrits par l'ingesteur ; on les relit a
+    chaque rendu pour refleter l'etat reel du disque, sans cache (l'onglet
+    Export est peu visite et la coherence prime sur le cout).
+    """
+    com = pc.read_json(COMMITTEE_PATH)
+    exp = pc.read_json(EXPORT_PATH)
+    hp = pc.read_json(HEALTH_PATH)
+    return (com if isinstance(com, dict) else None,
+            exp if isinstance(exp, dict) else None,
+            hp if isinstance(hp, dict) else None)
 
 
 def disk_bytes(path: Path, fallback: Optional[Any] = None) -> bytes:
@@ -1192,6 +1231,7 @@ def render_exports() -> None:
     can, _ = canonical()
     lg, _ = legacy()
     hp = health()
+    com, exp, _ = _load_export_tab_inputs()
 
     U.render(U.note(
         "<b>Exports fidèles au disque.</b> Les boutons servent les octets "
@@ -1216,11 +1256,19 @@ def render_exports() -> None:
             "de consommer ces fichiers en aval.", "warn"))
     st.markdown("")
 
-    c1, c2, c3 = st.columns(3)
+    # [AUDIT-F3] ``calendar.committee.json`` et ``trading_export.json`` sont
+    # PRODUITS par l'ingesteur mais n'étaient téléchargeables nulle part : un
+    # consommateur aval (merge, desk) devait aller les chercher sur le disque
+    # du serveur. On expose les cinq artefacts reellement publies.
+    c1, c2, c3, c4, c5 = st.columns(5)
     specs = (
         (c1, "calendar.json", LEGACY_PATH, lg, "legacy v1 · format de merge", "primary"),
         (c2, "calendar.latest.json", CANONICAL_PATH, can, "canonique v2 · schéma riche", "primary"),
-        (c3, "health.json", HEALTH_PATH, hp or {}, "supervision · forensique", "secondary"),
+        (c3, "calendar.committee.json", COMMITTEE_PATH, com,
+         "vue committee · hash de parité", "secondary"),
+        (c4, "trading_export.json", EXPORT_PATH, exp,
+         "export trading · recalculé", "secondary"),
+        (c5, "health.json", HEALTH_PATH, hp or {}, "supervision · forensique", "secondary"),
     )
     for col, name, path, fallback, hint, kind in specs:
         with col, st.container(border=True):
