@@ -120,45 +120,7 @@ CONNECT_TIMEOUT = 5.0
 READ_TIMEOUT = 15.0
 FETCH_DEADLINE_S = _env_float("BLUESTAR_FETCH_DEADLINE_S", 90.0)
 MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CADENCE DE FETCH — une SEULE source de vérité
-# ─────────────────────────────────────────────────────────────────────────────
-# [2.2a] L'espacement minimal entre deux TENTATIVES est l'invariant central qui
-# protège du 429. Il valait 120 s alors que le flux est HEBDOMADAIRE et que
-# ``DEFAULT_POLICY.max_source_age_seconds`` vaut 900 : l'artefact était déclaré
-# « à rafraîchir » au bout de 2 min, et comme l'ouverture de page, le fragment
-# live_strip (20 s) et le veilleur (3 s) appellent tous ``kick()``, un simple
-# onglet laissé ouvert refetchait la source toutes les ~2 minutes.
-#
-# RELATION À max_source_age_seconds — les deux valeurs DOIVENT rester égales :
-#   • ``max_source_age_seconds`` dit « au-delà, l'artefact est périmé » ;
-#   • ``MIN_FETCH_SPACING_S`` dit « en deçà, ne pas rappeler la source ».
-# Si l'espacement était plus COURT que la fraîcheur exigée, l'app se
-# contredirait : elle réclamerait un artefact frais tout en sachant qu'elle
-# vient d'interroger la source. S'il était plus LONG, on servirait un artefact
-# jugé périmé sans même essayer de le rafraîchir. D'où une valeur unique
-# DÉRIVÉE de la policy (jamais saisie deux fois), surchargeable par
-# BLUESTAR_MIN_FETCH_SPACING_S — mais jamais en dessous du plancher dur.
-DEFAULT_MIN_FETCH_SPACING_S = int(DEFAULT_POLICY.max_source_age_seconds)   # 900
-
-# [2.2b] PLANCHER DUR : même ``force=True`` ne peut pas rappeler la source avant
-# ce délai depuis la dernière TENTATIVE (pas seulement le dernier succès). Un
-# double-clic, deux sessions simultanées ou un rafraîchissement compulsif ne
-# peuvent donc pas marteler la source. Persisté sur disque (last_attempt.json)
-# pour tenir entre sessions, threads et redémarrages de conteneur.
-DEFAULT_FETCH_FLOOR_S = 120
-
-# [2.2c] Backoff après échec : minimum 300 s, plafond 3600 s. Un échec
-# DÉTERMINISTE (QUALITY_INVALID, NORMALIZATION_FAILED) ne doit pas être rejoué
-# à l'identique toutes les 2 minutes indéfiniment.
-DEFAULT_BACKOFF_MIN_S = 300
-BACKOFF_MAX_S = 3600
-
-MIN_FETCH_SPACING_S = _env_int("BLUESTAR_MIN_FETCH_SPACING_S",
-                               DEFAULT_MIN_FETCH_SPACING_S)
-FETCH_FLOOR_S = _env_int("BLUESTAR_FETCH_FLOOR_S", DEFAULT_FETCH_FLOOR_S)
-BACKOFF_MIN_S = _env_int("BLUESTAR_BACKOFF_MIN_S", DEFAULT_BACKOFF_MIN_S)
+MIN_FETCH_SPACING_S = _env_int("BLUESTAR_MIN_FETCH_SPACING_S", 120)
 RATE_LIMIT_COOLDOWN_S = _env_int("BLUESTAR_RATE_LIMIT_COOLDOWN_S", 600)
 RATE_LIMIT_MAX_COOLDOWN_S = 3600
 ARCHIVE_RAW = _env_flag("BLUESTAR_ARCHIVE_RAW")
@@ -199,24 +161,13 @@ def build_session() -> requests.Session:
     Session avec gestion correcte du taux de requête :
       • ``429`` hors de ``status_forcelist`` : un quota n'est pas une panne ;
       • ``respect_retry_after_header=False`` : aucun sommeil imposé au thread ;
-      • AUCUN retry urllib3 par défaut.
-
-    [2.2d] Le flux est un fichier statique servi par un CDN : un 5xx est déjà
-    rejoué par la cascade primaire -> secondaire du cycle, et une seconde
-    couche de retries ne faisait que multiplier les requêtes contre une source
-    qui rate-limite. Avec ``total=3`` et ``status_forcelist`` sur les 5xx, un
-    cycle pouvait émettre jusqu'à 2 URLs × (1 + 3) = 8 requêtes, avant même le
-    « quick retry » de l'UI. On borne donc à UNE requête par URL et par cycle
-    (``total=0``), ce qui rend le budget vérifiable : au plus 2 requêtes.
-
-    Surchargeable par BLUESTAR_HTTP_RETRIES pour l'exploitation.
+      • retries (3) réservés aux erreurs transitives (5xx, 408, timeout).
     """
     session = requests.Session()
-    retries = max(0, _env_int("BLUESTAR_HTTP_RETRIES", 0))
     retry = Retry(
-        total=retries, connect=retries, read=retries,
-        backoff_factor=0.5, backoff_jitter=0.2,
-        status_forcelist=(),                          # 5xx/408/429 : AUCUN retry
+        total=3, connect=3, read=3,
+        backoff_factor=1.5, backoff_jitter=0.4,
+        status_forcelist=[408, 500, 502, 503, 504],   # 429 EXCLU
         allowed_methods=frozenset(["GET"]),
         raise_on_status=False,
         respect_retry_after_header=False,             # [KEY FIX]
@@ -339,18 +290,6 @@ def fetch_source(session: requests.Session) -> Tuple[List[Dict], Dict[str, Any],
     Primaire → secondaire, puis nextweek en bonus.
     Retourne (raw_events, meta, feed_status). Un 429 remonte en RateLimited
     (sans retry, sans sommeil).
-
-    [2.2d] Au plus UNE requête par URL et par cycle : la cascade primaire ->
-    secondaire est la seule forme de reprise, il n'y a plus de couche urllib3.
-    Le budget d'un cycle est donc borné à 2 requêtes (primaire puis
-    secondaire), ou 3 si ``BLUESTAR_SOURCE_URL_NEXT`` est activé.
-
-    [2.9c] ``meta['resolved_url']`` porte l'URL RÉELLEMENT servie : le repli
-    CloudFront ne doit plus être maquillé en source primaire.
-
-    [2.9d] Un 429 sur n'importe quel flux pose le cooldown : sur ``nextweek``,
-    il remonte donc en ``RateLimited`` au lieu d'être avalé comme un « bonus ».
-    Un quota est global à la source, pas par endpoint.
     """
     meta: Dict[str, Any] = {}
     feed_status: Dict[str, str] = {}
@@ -358,7 +297,6 @@ def fetch_source(session: requests.Session) -> Tuple[List[Dict], Dict[str, Any],
     raw_bytes: Dict[str, bytes] = {}
     raw_list: Optional[List[Dict]] = None
     total_bytes = 0
-    resolved_url: Optional[str] = None
 
     for i, url in enumerate(SOURCE_URLS):
         try:
@@ -367,10 +305,6 @@ def fetch_source(session: requests.Session) -> Tuple[List[Dict], Dict[str, Any],
             feed_shas["thisweek"] = str(meta.get("payload_sha256"))
             raw_bytes["thisweek"] = meta.pop("raw_bytes", b"")
             total_bytes = int(meta.get("payload_bytes") or 0)
-            resolved_url = url                    # [2.9c] URL réellement servie
-            if i > 0:
-                LOG.warning("primary source unavailable — served by fallback #%d (%s)",
-                            i + 1, url)
             break
         except RateLimited:
             raise                                             # quota = arrêt net
@@ -400,10 +334,8 @@ def fetch_source(session: requests.Session) -> Tuple[List[Dict], Dict[str, Any],
                 feed_status["nextweek"] = f"error:{exc.code}"
                 LOG.warning("nextweek fetch failed (bonus, non-blocking): %s", exc)
         except RateLimited:
-            # [2.9d] Le quota est global à la source : on ne l'avale plus.
             feed_status["nextweek"] = "rate_limited"
-            LOG.warning("nextweek rate-limited — cooldown applies to the whole source")
-            raise
+            LOG.warning("nextweek fetch rate-limited (bonus, non-blocking)")
 
     ordered = [feed_shas[k] for k in ("thisweek", "nextweek") if k in feed_shas]
     meta["payload_sha256"] = ("sha256:" + sha256_hex("|".join(ordered))
@@ -412,7 +344,6 @@ def fetch_source(session: requests.Session) -> Tuple[List[Dict], Dict[str, Any],
     meta["feed_status"] = dict(feed_status)
     meta["feed_sha256"] = dict(feed_shas)
     meta["raw_by_feed"] = raw_bytes
-    meta["resolved_url"] = resolved_url or str(SOURCE_URLS[0])
     return raw_list, meta, feed_status
 
 
@@ -509,158 +440,14 @@ def clear_rate_limit(data_dir: Path) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DERNIÈRE TENTATIVE (persistée) — plancher de cadence entre sessions
-# ─────────────────────────────────────────────────────────────────────────────
-# [2.2b] Le plancher dur doit tenir au-delà du processus : l'UI Streamlit
-# réinstancie son superviseur, Streamlit Cloud redémarre le conteneur, et deux
-# sessions naviguent en parallèle. Un simple attribut en mémoire ne suffit donc
-# pas — la date de la dernière TENTATIVE (succès OU échec) est écrite sur
-# disque, dans le même répertoire que rate_limit.json.
-_LAST_ATTEMPT_KEY = "last_attempt_utc"
-
-
-def _last_attempt_path(data_dir: Path) -> Path:
-    return data_dir / "last_attempt.json"
-
-
-def read_last_attempt(data_dir: Path) -> Optional[datetime]:
-    """Instant de la dernière tentative de fetch, None si inconnu. ``None``
-    signifie « jamais tenté » -> le plancher ne s'applique pas."""
-    rec = read_json(_last_attempt_path(data_dir))
-    if not isinstance(rec, dict):
-        return None
-    stamp = rec.get(_LAST_ATTEMPT_KEY)
-    if not stamp:
-        return None
-    try:
-        dt = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        return None
-    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
-
-
-def record_attempt(data_dir: Path, now: Optional[datetime] = None) -> None:
-    """Horodate une TENTATIVE de fetch (avant même de savoir si elle réussit).
-
-    C'est ce qui rend le plancher dur réellement contraignant : un échec répété
-    ne peut pas être rejoué en boucle tant que le plancher n'est pas écoulé.
-    """
-    now = now or datetime.now(UTC)
-    try:
-        atomic_write_json(_last_attempt_path(data_dir), {
-            _LAST_ATTEMPT_KEY: iso_z(now),
-            "applied_at_utc": iso_z(datetime.now(UTC)),
-        })
-    except OSError:                                           # pragma: no cover
-        LOG.warning("last_attempt.json non écrit (disque en lecture seule ?)")
-
-
-def seconds_since_last_attempt(data_dir: Path,
-                               now: Optional[datetime] = None) -> Optional[float]:
-    """Secondes écoulées depuis la dernière tentative, None si jamais tenté."""
-    last = read_last_attempt(data_dir)
-    if last is None:
-        return None
-    now = now or datetime.now(UTC)
-    return (now - last).total_seconds()
-
-
-def fetch_floor_remaining(data_dir: Path, now: Optional[datetime] = None,
-                          floor_s: Optional[float] = None) -> float:
-    """Secondes à attendre avant qu'une tentative FORCÉE soit permise.
-
-    0.0 = autorisé. C'est la garde que ``force=True`` NE PEUT PAS contourner :
-    un double-clic sur « Relancer l'ingestion » ne rappelle pas la source.
-    """
-    floor = float(FETCH_FLOOR_S if floor_s is None else floor_s)
-    elapsed = seconds_since_last_attempt(data_dir, now)
-    if elapsed is None:
-        return 0.0
-    return max(0.0, floor - elapsed)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # CYCLE D'INGESTION
 # ─────────────────────────────────────────────────────────────────────────────
-def _served_artifact_facts(data_dir: Path) -> Dict[str, Any]:
-    """Ce que le disque sert RÉELLEMENT, indépendamment du cycle en cours.
-
-    [2.4] Pendant un cooldown ou un échec, ``write_health`` écrasait
-    health.json avec ``status UNAVAILABLE``, ``event_count 0`` et un hash nul —
-    ce qui contredisait l'artefact toujours servi et faisait perdre la date du
-    dernier succès. On relit donc l'état précédent pour le CONSERVER, et on
-    décrit l'artefact présent sur disque.
-    """
-    prev = read_json(data_dir / "health.json")
-    prev = prev if isinstance(prev, dict) else {}
-
-    canonical = read_json(data_dir / "calendar.latest.json")
-    canonical = canonical if isinstance(canonical, dict) else None
-
-    out: Dict[str, Any] = {
-        "last_success_utc": prev.get("last_success_utc"),
-        "last_success_content_hash": prev.get("last_success_content_hash"),
-        "last_success_event_count": prev.get("last_success_event_count"),
-        "last_success_parity_hash": prev.get("last_success_parity_hash"),
-        "artifact_present": canonical is not None,
-        "artifact_generated_at_utc": None,
-        "artifact_fetched_at_utc": None,
-        "served_artifact_age_s": None,
-        "served_artifact_event_count": None,
-        "served_artifact_content_hash": None,
-    }
-    if canonical is None:
-        return out
-
-    src = canonical.get("source") if isinstance(canonical.get("source"), dict) else {}
-    gen_raw = canonical.get("generated_at_utc")
-    fetch_raw = src.get("fetched_at_utc") or gen_raw
-    out["artifact_generated_at_utc"] = gen_raw
-    out["artifact_fetched_at_utc"] = fetch_raw
-    out["served_artifact_content_hash"] = canonical.get("content_hash")
-    events = canonical.get("events")
-    out["served_artifact_event_count"] = len(events) if isinstance(events, list) else None
-
-    stamp = _parse_iso_utc(fetch_raw)
-    if stamp is not None:
-        # L'âge est NÉGATIF si l'horodatage est dans le futur (horloge du CDN en
-        # avance) : on le borne à 0, un âge négatif serait un mensonge.
-        out["served_artifact_age_s"] = max(0, int((datetime.now(UTC) - stamp).total_seconds()))
-    return out
-
-
-def _parse_iso_utc(raw: Any) -> Optional[datetime]:
-    if not raw:
-        return None
-    try:
-        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        return None
-    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
-
-
 def write_health(data_dir: Path, now: datetime, payload: Optional[CalendarPayload],
                  error: Optional[str], *, rate_limited: bool = False,
                  mode: str = "live") -> None:
-    """Écrit health.json — ADDITIF, sans jamais effacer l'historique du succès.
-
-    Version 1.2 : ajoute last_success_* et served_artifact_* (2.4). Un cycle en
-    cooldown/échec RELIT l'ancien health et ne remet pas ces champs à zéro :
-    l'UI peut ainsi afficher l'âge RÉEL de l'artefact servi.
-    """
-    facts = _served_artifact_facts(data_dir)
-    # Horodatage du dernier SUCCÈS : mis à jour uniquement quand ce cycle a
-    # réellement publié (payload VALID/DEGRADED), sinon hérité du health
-    # précédent.
-    if payload is not None:
-        facts["last_success_utc"] = iso_z(now)
-        facts["last_success_content_hash"] = payload.content_hash
-        facts["last_success_event_count"] = len(payload.events)
-        facts["last_success_parity_hash"] = payload.parity_hash
-
     status = payload.quality.status.value if payload else "UNAVAILABLE"
     atomic_write_json(data_dir / "health.json", {
-        "schema_version": "health-pipeline-1.2",
+        "schema_version": "health-pipeline-1.1",
         "core_schema_version": SCHEMA_VERSION,
         "status": status,
         "mode": mode,
@@ -679,8 +466,6 @@ def write_health(data_dir: Path, now: datetime, payload: Optional[CalendarPayloa
         "warnings": list(payload.quality.warnings) if payload else [],
         "feeds_status": dict(payload.source.feed_status) if payload else {},
         "tz": tz_environment(),
-        # ── [2.4] champs ADDITIFS : ce qui est servi, et depuis quand ────────
-        **facts,
     })
 
 
@@ -732,11 +517,6 @@ def run_once(data_dir: Path, session: Optional[requests.Session] = None,
     feed_status: Dict[str, str] = {}
     error: Optional[str] = None
 
-    # [2.2b] La tentative est horodatée AVANT le fetch, sur disque : c'est ce
-    # qui rend le plancher dur contraignant même après un échec, un redémarrage
-    # de conteneur ou depuis une autre session.
-    record_attempt(data_dir, now)
-
     try:
         with closing(session) if owns_session else nullcontext():
             raw_list, meta, feed_status = fetch_source(session)
@@ -755,35 +535,10 @@ def run_once(data_dir: Path, session: Optional[requests.Session] = None,
 
     _archive_raw(data_dir, meta.pop("raw_by_feed", {}) or {}, now)
 
-    # [2.4] fetched_at_utc est pris À LA RÉCEPTION DE LA RÉPONSE, pas avant le
-    # fetch. Avec ``now`` (capturé en entrée de run_once), l'âge de la source
-    # valait 0 par construction : ``source_age_seconds`` = 0, ``is_stale``
-    # toujours False, ``serving_mode`` toujours "live" — l'artefact ne pouvait
-    # jamais se déclarer périmé. On préfère l'horodatage du CDN
-    # (Last-Modified) quand il est exploitable, sinon l'instant de réception.
-    received_at = datetime.now(UTC)
-    fetched_at = received_at
-    _lm = meta.get("last_modified")
-    if _lm:
-        try:
-            from email.utils import parsedate_to_datetime
-            _parsed = parsedate_to_datetime(str(_lm))
-            if _parsed is not None:
-                _parsed = (_parsed.replace(tzinfo=UTC) if _parsed.tzinfo is None
-                           else _parsed.astimezone(UTC))
-                # Le CDN peut dater de plusieurs jours (flux hebdomadaire) :
-                # c'est légitime. On ne retient sa date que si elle n'est pas
-                # dans le futur (horloge du CDN en avance = donnée incohérente).
-                if _parsed <= received_at:
-                    fetched_at = _parsed
-        except (TypeError, ValueError):
-            pass
-
     source = SourceInfo(
         provider=SOURCE_PROVIDER,
         url=str(SOURCE_URLS[0]),
-        resolved_url=str(meta.get("resolved_url") or SOURCE_URLS[0]),   # [2.9c]
-        fetched_at_utc=fetched_at,                                      # [2.4]
+        fetched_at_utc=now,
         fetch_duration_ms=int(meta.get("fetch_duration_ms") or 0),
         http_status=meta.get("http_status"),
         content_type=meta.get("content_type"),
@@ -795,7 +550,6 @@ def run_once(data_dir: Path, session: Optional[requests.Session] = None,
         from_last_known_good=False,
         feed_status=dict(feed_status),
         feed_sha256=dict(meta.get("feed_sha256") or {}),
-        served_from_cache=False,
     )
 
     try:
@@ -814,20 +568,9 @@ def run_once(data_dir: Path, session: Optional[requests.Session] = None,
     canonical = payload.model_dump(mode="json")
     legacy = to_legacy_payload(payload, now)
 
-    # [2.9h] ORDRE D'ÉCRITURE — les trois artefacts ne sont pas écrits dans une
-    # transaction : un téléchargement qui tomberait ENTRE deux écritures
-    # servirait un couple incohérent. On écrit donc l'artefact canonique
-    # D'ABORD et le legacy EN DERNIER, si bien que la fenêtre d'incohérence
-    # n'expose jamais un legacy neuf face à un canonique périmé.
-    # Les deux fichiers portent le MÊME ``generated_at_utc`` (celui du payload)
-    # : c'est le marqueur qui permet à un consommateur aval — et à l'onglet
-    # Export de l'app — de DÉTECTER l'incohérence au lieu de la subir.
-    # ``calendar.legacy.json`` est un miroir octet pour octet de
-    # ``calendar.json`` : il est écrit en dernier et n'a pas de consommateur
-    # distinct.
     atomic_write_json(data_dir / "calendar.latest.json", canonical)
-    atomic_write_json(data_dir / "calendar.legacy.json", legacy)
     atomic_write_json(data_dir / "calendar.json", legacy)
+    atomic_write_json(data_dir / "calendar.legacy.json", legacy)
     # [COMPAT-C15] Vue committee : écrite APRÈS les artefacts historiques,
     # un échec ici ne bloque jamais la publication du calendrier.
     try:
@@ -846,94 +589,18 @@ def run_once(data_dir: Path, session: Optional[requests.Session] = None,
     return payload
 
 
-def seed_from_existing(data_dir: Path) -> Tuple[Optional[Path], Optional[str]]:
-    """Écrit le seed depuis l'artefact canonique DÉJÀ présent sur disque.
-
-    [2.8] ``run_once`` renvoie ``None`` pour trois raisons parfaitement
-    normales — cooldown 429, artefact encore récent, mode lecteur — et le seed
-    n'était alors jamais écrit, ``setup.py`` répondant « vérifiez votre
-    connexion » alors que le calendrier existait sur le disque. On réutilise
-    donc l'artefact local s'il est VALIDE (``CalendarPayload.model_validate``,
-    statut non INVALID).
-
-    Retourne (chemin, raison_d_echec).
-    """
-    canonical_path = data_dir / "calendar.latest.json"
-    if not canonical_path.exists():
-        return None, f"aucun artefact canonical ({canonical_path.name} absent)"
-    canonical = read_json(canonical_path)
-    if not isinstance(canonical, dict):
-        # read_json renvoie None aussi bien pour « absent » que pour « illisible » :
-        # les confondre produirait un diagnostic trompeur, exactement le defaut
-        # que le point 2.8 corrige.
-        return None, (f"artefact canonical illisible ou non-objet JSON "
-                      f"({canonical_path.name})")
-
-    # Un schéma plus ancien reste exploitable : on laisse pydantic appliquer ses
-    # défauts sur les champs additifs, mais on refuse un payload incohérent.
-    try:
-        payload = CalendarPayload.model_validate(canonical)
-    except Exception as exc:                                  # noqa: BLE001
-        return None, f"artefact canonical invalide ({type(exc).__name__}: {exc})"
-
-    status = payload.quality.status
-    if status == QualityStatus.INVALID:
-        return None, ("artefact canonical INVALID — un seed ne doit jamais "
-                      "propager des données rejetées")
-
+def emit_seed(data_dir: Path, session: Optional[requests.Session] = None) -> Optional[Path]:
+    """Produit seed/calendar.latest.seed.json pour le cold-start Cloud."""
     seed_dir = data_dir / "seed"
     seed_dir.mkdir(parents=True, exist_ok=True)
+    payload = run_once(data_dir, session)
+    if payload is None:
+        LOG.error("seed not written (no valid payload)")
+        return None
     seed_path = seed_dir / "calendar.latest.seed.json"
     atomic_write_json(seed_path, payload.model_dump(mode="json"))
-    LOG.info("seed written from existing artifact to %s", seed_path)
-    return seed_path, None
-
-
-def seed_failure_reason(data_dir: Path) -> str:
-    """Pourquoi ``run_once`` n'a rien publié — la VRAIE raison, pas
-    « vérifiez votre connexion »."""
-    if ingest_disabled():
-        return ("mode lecteur actif (BLUESTAR_DISABLE_INGEST=1) : l'ingestion "
-                "est déléguée à un ingesteur externe, aucun fetch n'est tenté")
-    if is_rate_limited(data_dir):
-        rl = read_rate_limit(data_dir) or {}
-        return (f"cooldown 429 actif jusqu'à {rl.get('blocked_until_utc')} "
-                f"(retry_after={rl.get('retry_after')}s)")
-    remaining = fetch_floor_remaining(data_dir)
-    if remaining > 0:
-        return (f"plancher anti-429 en cours ({remaining:.0f}s restantes) : la "
-                "source vient d'être interrogée")
-    health = read_json(data_dir / "health.json")
-    if isinstance(health, dict) and health.get("error"):
-        return f"dernier cycle en échec : {health['error']}"
-    return "aucun payload valide produit par le cycle"
-
-
-def emit_seed(data_dir: Path, session: Optional[requests.Session] = None) -> Optional[Path]:
-    """Produit seed/calendar.latest.seed.json pour le cold-start Cloud.
-
-    [2.8] Si le cycle n'a rien publié (cooldown, artefact récent, mode
-    lecteur), on retombe sur l'artefact canonique local plutôt que d'échouer :
-    un seed doit exister dès qu'un calendrier valide est disponible.
-    """
-    seed_dir = data_dir / "seed"
-    seed_dir.mkdir(parents=True, exist_ok=True)
-    seed_path = seed_dir / "calendar.latest.seed.json"
-
-    payload = run_once(data_dir, session)
-    if payload is not None:
-        atomic_write_json(seed_path, payload.model_dump(mode="json"))
-        LOG.info("seed written to %s", seed_path)
-        return seed_path
-
-    reason = seed_failure_reason(data_dir)
-    LOG.warning("aucun cycle publié (%s) — repli sur l'artefact existant", reason)
-    fallback, why = seed_from_existing(data_dir)
-    if fallback is not None:
-        return fallback
-
-    LOG.error("seed not written: %s ; %s", reason, why)
-    return None
+    LOG.info("seed written to %s", seed_path)
+    return seed_path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
