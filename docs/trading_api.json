@@ -1,26 +1,54 @@
-﻿{
-  "version": "1.0.0",
+{
+  "version": "1.1.0",
   "provider": "Fair Economy (Forex Factory)",
-  "description": "BLUESTAR Calendar Pro - Rich export for trading applications",
-  "features": [
-    "High/Medium/Low impact events",
-    "FOMC, ECB, BOJ, BOE major central banks",
-    "CPI, NFP, GDP, PCE core economic indicators",
-    "Forecast, previous, and actual values",
-    "UTC and local timezone support"
-  ],
-  "endpoints": {
+  "description": "BLUESTAR Calendar - description honnete du flux et de l'export trading",
+  "feed": {
     "thisweek": "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
-    "nextweek": "https://nfs.faireconomy.media/ff_calendar_nextweek.json"
+    "thisweek_fallback": "https://d1tcktd03x2wof.cloudfront.net/ff_calendar_thisweek.json",
+    "nextweek": "OPT-IN - desactive par defaut (BLUESTAR_SOURCE_URL_NEXT) : la source renvoie regulierement 404",
+    "cadence": "Le fichier hebdomadaire est republie une fois par semaine (typiquement vendredi/samedi). L'ingesteur NE sonde PAS en continu : espacement minimal BLUESTAR_MIN_FETCH_SPACING_S (900 s par defaut, aligne sur max_source_age_seconds) et cooldown de 300 a 3600 s apres tout echec.",
+    "recommended_production": "BLUESTAR_DISABLE_INGEST=1 dans l'app + ingesteur externe (cron/GitHub Action) lancant `python pipeline_calendar.py --once` toutes les 15 min.",
+    "quota_rule": "INCONNUE - non presentee comme un fait. La regle exacte de quota de la source n'a pas ete etablie."
   },
-  "update_frequency": "Weekly (Friday/Saturday)",
+  "impact_levels": {
+    "published_by_source": [
+      "High",
+      "Medium",
+      "Low",
+      "Holiday"
+    ],
+    "retained_by_default_policy": [
+      "HIGH",
+      "MEDIUM"
+    ],
+    "note": "La SelectionPolicy ne retient que HIGH et MEDIUM. Low/Holiday existent dans le flux mais ne sont pas publies dans les artefacts par defaut."
+  },
+  "actual_values": {
+    "supported": false,
+    "status_field": "actual_status",
+    "status_values": {
+      "UNSUPPORTED_BY_SOURCE": "Le flux JSON public de Forex Factory / Fair Economy ne publie AUCUN champ 'actual'. L'export ne contiendra donc jamais de valeur realisée."
+    },
+    "note": "Les valeurs 'actual' n'existent pas dans ce flux. Les obtenir demanderait une autre source ou un scraping de la page FF - NON implemente, NON branche, et a valider explicitement avec le proprietaire avant tout developpement."
+  },
   "data_points": {
     "title": "Event name",
     "country": "Currency code (USD, EUR, GBP, JPY, etc.)",
     "date": "ISO 8601 with timezone offset",
-    "impact": "High/Medium/Low",
-    "forecast": "Expected value",
-    "previous": "Previous release",
-    "actual": "Released value (when available)"
+    "impact": "High/Medium/Low/Holiday",
+    "forecast": "Expected value (peut etre absent ou null)",
+    "previous": "Previous release (peut etre absent ou null)"
+  },
+  "trading_export": {
+    "generator": "trading_export.py",
+    "fields": {
+      "generated_at_utc": "Horodatage commun aux artefacts du cycle (detecte un couple incoherent)",
+      "fetched_at_utc": "Horodatage du fetch source",
+      "artifact_age_s": "Age reel de l'artefact en secondes",
+      "quality_status": "VALID / DEGRADED / INVALID",
+      "is_stale": "Recalcule a l'export, jamais lu tel quel",
+      "pairs_with_currency_exposure": "CONTEXTE uniquement - n'est PAS un signal directionnel (voir pairs_semantics)"
+    },
+    "refusal_policy": "L'export echoue (code retour non nul) si l'artefact est INVALID, sans horodatage, ou plus vieux que BLUESTAR_TRADING_MAX_AGE_S (defaut 3600 s) sauf --allow-stale."
   }
 }
