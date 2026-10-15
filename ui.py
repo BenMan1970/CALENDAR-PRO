@@ -88,12 +88,17 @@ def _css() -> str:
 }}
 html, body, [class*="css"] {{ font-family: var(--font); }}
 
-/* ── Frameless : on efface le chrome natif ─────────────────────────────── */
-[data-testid="stHeader"] {{ background: transparent; height: 0; }}
+/* ── Frameless : on efface le chrome natif, SANS masquer la barre Cloud ──
+   [2.9e] Mettre stHeader a height:0 faisait RECOUVRIR le haut du contenu par
+   la barre Share/★/✎ de Streamlit Cloud (visible sur les captures). On garde
+   donc la hauteur reelle du header et on compense par un padding-top sur le
+   conteneur : le chrome reste hors-charte mais ne recouvre plus rien. */
+[data-testid="stHeader"] {{ background: transparent; }}
 [data-testid="stToolbar"] {{ right: 12px; top: 6px; }}
 [data-testid="stDecoration"], #MainMenu, footer {{ display: none !important; }}
 [data-testid="stStatusWidget"] {{ display: none; }}
-.block-container {{ padding: 1.1rem 2.6rem 4rem; max-width: 1520px; }}
+.block-container {{ padding: 3.4rem 2.6rem 4rem; max-width: 1520px; }}
+[data-testid="stAppViewContainer"] > .main {{ padding-top: 0; }}
 [data-testid="stVerticalBlock"] {{ gap: 0.85rem; }}
 hr, [data-testid="stDivider"] hr {{
   border: 0; height: 1px; background: linear-gradient(90deg, var(--line), transparent);
@@ -412,6 +417,12 @@ def day_header(label: str, count: int) -> str:
             f'<span class="bs-day__count">{count:02d} événement{"s" if count > 1 else ""}</span></div>')
 
 
+# [2.1] Quand la source ne publie pas de champ « actual », afficher « n/d
+# source » plutôt que « — » : un tiret laisse croire que la valeur manque par
+# accident, alors que c'est une propriété connue du flux.
+ACTUAL_UNSUPPORTED_LABEL = "n/d source"
+
+
 def _stat(label: str, value: Optional[str], kind: str = "") -> str:
     shown = value if value not in (None, "", "—") else "—"
     cls = kind if shown != "—" else ""
@@ -439,7 +450,15 @@ def event_card(ev: dict, *, show_pairs: bool = False, delay_ms: int = 0) -> str:
     if show_pairs and ev.get("pairs"):
         shown = ", ".join(ev["pairs"][:8])
         extra = f" +{len(ev['pairs']) - 8}" if len(ev["pairs"]) > 8 else ""
-        pairs_html = f'<div class="bs-ev__pairs">{escape(shown)}{extra}</div>'
+        pairs_html = f'<div class="bs-ev__pairs">{escape(shown)}{escape(extra)}</div>'
+
+    # [2.1] La colonne Actual distingue « pas encore publié » de « la source ne
+    # publie pas ce champ » : le flux FF hebdomadaire n'a pas de clé actual.
+    actual_status = ev.get("actual_status")
+    if actual_status == "UNSUPPORTED_BY_SOURCE":
+        actual_html = _stat("Actual", ACTUAL_UNSUPPORTED_LABEL)
+    else:
+        actual_html = _stat("Actual", ev.get("actual"), "act")
 
     return f"""
 <div class="bs-ev{state}" style="animation-delay:{delay_ms}ms">
@@ -458,7 +477,7 @@ def event_card(ev: dict, *, show_pairs: bool = False, delay_ms: int = 0) -> str:
     <div class="bs-ev__stats">
       {_stat("Forecast", ev.get("forecast"), "hit")}
       {_stat("Previous", ev.get("previous"))}
-      {_stat("Actual", ev.get("actual"), "act")}
+      {actual_html}
     </div>
     {pairs_html}
   </div>

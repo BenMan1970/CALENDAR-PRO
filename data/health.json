@@ -1,25 +1,28 @@
 {
-  "schema_version": "health-pipeline-1.1",
-  "core_schema_version": "2.4.1",
-  "status": "VALID",
-  "mode": "live",
-  "checked_at_utc": "2026-09-18T14:32:56Z",
-  "error": null,
-  "rate_limited": false,
-  "rate_limit": null,
-  "event_count": 19,
-  "data_quality_score": 1.0,
-  "content_hash": "sha256:b76f6c9a2956944cb367850cefb48b7e60a025836d95c416b9feaf7b4b539827",
-  "warnings": [
-    "SOURCE_DOES_NOT_PROVIDE_ACTUAL"
-  ],
-  "feeds_status": {
-    "thisweek": "ok",
-    "nextweek": "absent_404"
+  "schema_version": "health-pipeline-1.2",
+  "core_schema_version": "2.4.2",
+  "status": "UNAVAILABLE",
+  "mode": "cooldown",
+  "checked_at_utc": "2026-10-15T16:22:35Z",
+  "error": "RATE_LIMITED (retry_after=300.0)",
+  "rate_limited": true,
+  "rate_limit": {
+    "blocked_until_utc": "2026-10-15T16:32:35Z",
+    "rate_limited_until_utc": "2026-10-15T16:32:35Z",
+    "retry_after": 300.0,
+    "cooldown_s": 600.0,
+    "applied_at_utc": "2026-10-15T16:22:35Z"
   },
+  "event_count": 0,
+  "data_quality_score": 0.0,
+  "content_hash": null,
+  "parity_hash": null,
+  "parity_window_anchor_utc": null,
+  "warnings": [],
+  "feeds_status": {},
   "tz": {
-    "tzdata_pip_version": "2026.3",
-    "tzpath_head": "C:\\Users\\titan\\AppData\\Roaming\\Python\\Python312\\site-packages\\tzdata\\zoneinfo",
+    "tzdata_pip_version": "2026.4",
+    "tzpath_head": "/home/blue_star/Calendar 15-10-2026/CALENDAR-PRO-main/.venv/lib/python3.14/site-packages/tzdata/zoneinfo",
     "pip_tzdata_authoritative": true,
     "casablanca_offsets": {
       "2026-09-19": [
@@ -34,6 +37,23 @@
         0.0,
         "+00"
       ]
+    },
+    "compat": {
+      "compat_module_version": "calendar-compat-1.0.0",
+      "tzdata_pinned": true,
+      "tzdata_source": "already_pinned",
+      "tzdata_version": "2026.4",
+      "tzpath_head": "/home/blue_star/Calendar 15-10-2026/CALENDAR-PRO-main/.venv/lib/python3.14/site-packages/tzdata/zoneinfo"
     }
-  }
+  },
+  "last_success_utc": "2026-10-15T16:21:21Z",
+  "last_success_content_hash": "sha256:213589516be5a81517bfdfb86f84f49b803e7de61ac98de6968ced0a05a7b13f",
+  "last_success_event_count": 25,
+  "last_success_parity_hash": "sha256:90dc5eb02c4ea85e466984bef5af9d25a1dd89cb3d0d3286bf83b08a9f4dca28",
+  "artifact_present": true,
+  "artifact_generated_at_utc": "2026-10-15T16:21:21Z",
+  "artifact_fetched_at_utc": "2026-10-15T16:21:22Z",
+  "served_artifact_age_s": 73,
+  "served_artifact_event_count": 25,
+  "served_artifact_content_hash": "sha256:213589516be5a81517bfdfb86f84f49b803e7de61ac98de6968ced0a05a7b13f"
 }

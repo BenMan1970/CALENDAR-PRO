@@ -316,7 +316,12 @@ def parse_source_datetime(raw: Any) -> datetime:
 _NUM_RE = re.compile(
     # [M3 port] Préfixes ≤ ≥ ± ≈ alignés sur le macro et ENGINE._parse_ff_value.
         # Le flux FF actuel n'émet que < > ~ et nombres nus : zéro impact économique.
-    r"^([<>~≈≤≥±]?)\s*(-?[\d]+(?:[.,][\d]+)*)\s*([KMBT]?)\s*(%?)$", re.IGNORECASE
+    # [2.9g] Le signe explicite « + » est accepté comme « - » : le flux publie
+    # des variations signées (« +0.1 », « +2.5% ») et les rejeter en
+    # UNPARSEABLE faisait perdre la VALEUR alors que le signe est porté par le
+    # nombre. Sans risque pour la parité : content_hash projette ``.raw``, donc
+    # seule ``.value``/``.parse_status`` changent, jamais le hash.
+    r"^([<>~≈≤≥±]?)\s*([+-]?[\d]+(?:[.,][\d]+)*)\s*([KMBT]?)\s*(%?)$", re.IGNORECASE
 )
 _THOUSANDS_COMMA = re.compile(r"^-?\d{1,3}(?:,\d{3})+$")
 # [COMPAT-C11] Un séparateur de milliers isolé doit être confirmé par ≥ 2
@@ -637,6 +642,16 @@ class SourceInfo(BaseModel):
     # sha256 des octets par flux d'origine (payload_sha256 ci-dessus étant
         # l'agrégat) — traçabilité par flux. Exclu du content_hash, même raison.
     feed_sha256: Dict[str, str] = Field(default_factory=dict)
+    # [2.9c] URL RÉELLEMENT servie par le cycle. ``url`` reste l'URL primaire
+    # (contrat historique, root « source » exclue du content_hash) ; ce champ
+    # additif dit la vérité quand le repli CloudFront a servi. Additif : un
+    # artefact ou un seed antérieur reste valide.
+    resolved_url: Optional[str] = None
+    # [2.4] Vrai si le cycle a servi un artefact antérieur au lieu d'en
+    # produire un neuf (cooldown / échec de source). Rendu explicite dans
+    # l'artefact : un consommateur aval peut distinguer « frais » de
+    # « ressassement » sans lire health.json.
+    served_from_cache: bool = False
 
     @field_serializer("fetched_at_utc")
     def _ser(self, v: datetime, _info) -> str:
