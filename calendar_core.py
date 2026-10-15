@@ -1833,7 +1833,27 @@ def to_legacy_payload(payload: CalendarPayload, now_utc: datetime) -> Dict[str, 
         # indexé par date d'AFFICHAGE : sans recalcul, un événement de 23:00 UTC
         # apparaîtrait sous la veille dans le sommaire.
     if _CC_AVAILABLE:
-        _tzk, _tzo = _CC.resolve_display_tz(fallback=_FALLBACK_DISPLAY_TZ)
+        # [2.3-CORRECTIF] La vue legacy doit suivre la SAME politique que le
+        # payload, pas re-resoudre le fuseau de zero. ``resolve_display_tz``
+        # place le fuseau SYSTÈME avant le fallback : dans le conteneur
+        # Streamlit Cloud (TZ=Etc/UTC, pas de BLUESTAR_DISPLAY_TZ), l'artefact
+        # etait donc ecrit avec display_timezone="Etc/UTC" / origin="system"
+        # alors que la politique et l'app affichent Africa/Casablanca. Les
+        # heures du JSON legacy divergeaient d'une heure de celles de l'UI —
+        # pour un consommateur aval, deux verites contradictoires.
+        # Le fuseau de la politique est deja resolu et fait AUTORITE : on ne
+        # consulte le systeme que si la politique n'en porte aucun.
+        _pol_tz = getattr(payload.selection_policy, "display_timezone", None)
+        _tzk = _pol_tz or _CC.resolve_display_tz(fallback=_FALLBACK_DISPLAY_TZ)[0]
+        # L'origine reste celle du MODULE (``DISPLAY_TZ_ORIGIN``) des lors que
+        # la politique porte le meme fuseau : le champ decrit COMMENT le
+        # fuseau a ete choisi (env/system/fallback), information que le
+        # payload ne stocke pas. On ne l'invente donc pas — on ne le
+        # « policy »-ise que si la politique IMPOSE un fuseau different de
+        # celui que la resolution par defaut aurait donne.
+        _default_tz, _default_origin = _CC.resolve_display_tz(
+            fallback=_FALLBACK_DISPLAY_TZ)
+        _tzo = _default_origin if _tzk == _default_tz else "policy"
         try:
             _CC.localize_rows(rows, _tzk, _tzo)
             _legacy["summary_by_day"] = _CC.rebuild_summary_by_day(rows)
