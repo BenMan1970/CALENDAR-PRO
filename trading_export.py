@@ -38,6 +38,16 @@ DEFAULT_DATA_DIR = ROOT / "data"
 # de valeur décisionnelle.
 DEFAULT_MAX_AGE_S = 3600
 
+# [F8] Version du CONTRAT de ce document. À incrémenter dès qu'une clé
+# racine ou un champ d'événement change de sens : un consommateur aval doit
+# pouvoir refuser un schéma qu'il ne connaît pas plutôt que le mal lire.
+EXPORT_SCHEMA_VERSION = "trading-export-1.0.0"
+
+
+def iso_z(dt: datetime) -> str:
+    """Instant UTC au format ``...Z`` — identique au reste du contrat."""
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
 
 def _parse_utc(raw: Any) -> Optional[datetime]:
     if not raw:
@@ -155,6 +165,12 @@ def build_export(data: Dict[str, Any], now: Optional[datetime] = None
 
     facts = artifact_facts(data, now)
     document = {
+        # [F8] Un consommateur institutionnel doit pouvoir identifier le
+        # CONTRAT qu'il lit et savoir QUAND le document a été produit. Sans
+        # ``exported_at_utc``, il devait dériver l'heure d'export de
+        # ``fetched_at_utc + artifact_age_s`` — fragile et indirect.
+        "schema_version": EXPORT_SCHEMA_VERSION,
+        "exported_at_utc": iso_z(now),
         # [2.9h] Les deux artefacts portent le même generated_at_utc : c'est ce
         # qui permet à un consommateur aval de détecter un couple incohérent.
         "generated_at_utc": facts["generated_at_utc"],

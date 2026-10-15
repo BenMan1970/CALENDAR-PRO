@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from html import escape as escape_html
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import zoneinfo
 from zoneinfo import ZoneInfo
 
 import streamlit as st
@@ -494,7 +495,14 @@ def _raw_of(node: Any) -> Any:
 # Désormais l'affichage est TOUJOURS dérivé de ``dt_utc`` avec un fuseau choisi
 # explicitement ici, et le JSON sur disque n'est pas modifié.
 DEFAULT_VIEW_TZ = "Africa/Casablanca"
-VIEW_TZ_LABELS = (
+
+# [F1-voyage] Le propriétaire se déplace : un liste FERMÉE de 8 villes le
+# laissait sans recours à Riyad, Singapour, São Paulo ou Toronto — toutes
+# pourtant présentes dans tzdata (599 zones). Le sélecteur propose désormais
+# une liste courte de destinations courantes ET la base IANA complète, que
+# ``st.selectbox`` rend filtrable au clavier. Choisir une ville n'est donc
+# jamais impossible : au pire, on tape son nom.
+VIEW_TZ_COMMON = (
     "Africa/Casablanca",
     "UTC",
     "Europe/Paris",
@@ -504,6 +512,45 @@ VIEW_TZ_LABELS = (
     "Asia/Dubai",
     "Australia/Sydney",
 )
+# Étiquette lisible : « Asia/Singapore — UTC+8 ». L'offset est calculé sur
+# l'instant COURANT, donc juste en heure d'été comme en heure d'hiver.
+_TZ_OFFSET_CACHE: Dict[str, str] = {}
+
+
+def available_view_tzs() -> List[str]:
+    """Toutes les zones IANA utilisables, triées, avec les choix courants
+    d'abord. Repli sur la liste courte si tzdata est indisponible."""
+    try:
+        keys = sorted(zoneinfo.available_timezones())
+    except Exception:                                          # noqa: BLE001
+        keys = []
+    if not keys:
+        return list(VIEW_TZ_COMMON)
+    common = [t for t in VIEW_TZ_COMMON if t in keys]
+    return common + [t for t in keys if t not in set(common)]
+
+
+def tz_display_label(key: str, now: Optional[datetime] = None) -> str:
+    """« Asia/Singapore — UTC+8 ». Un nom seul ne dit pas l'heure qu'il est."""
+    if key not in _TZ_OFFSET_CACHE:
+        try:
+            ref = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo(key))
+            _TZ_OFFSET_CACHE[key] = _CC_OFFSET_LABEL(ref)
+        except Exception:                                      # noqa: BLE001
+            _TZ_OFFSET_CACHE[key] = ""
+    off = _TZ_OFFSET_CACHE[key]
+    return f"{key} — {off}" if off else key
+
+
+def _CC_OFFSET_LABEL(dt: datetime) -> str:
+    """« UTC+8 », « UTC+5:30 », « UTC-4 ». Jamais codé en dur."""
+    offset = dt.utcoffset()
+    if offset is None:
+        return "UTC"
+    minutes = int(offset.total_seconds() // 60)
+    sign = "+" if minutes >= 0 else "-"
+    hh, mm = divmod(abs(minutes), 60)
+    return f"UTC{sign}{hh}" + (f":{mm:02d}" if mm else "")
 
 
 def resolve_view_tz(explicit: Optional[str] = None) -> Tuple[str, str]:
@@ -522,6 +569,27 @@ def resolve_view_tz(explicit: Optional[str] = None) -> Tuple[str, str]:
         if key:
             return key, origin
     return DEFAULT_VIEW_TZ, "fallback"
+
+
+def _suggested_view_tz() -> Optional[str]:
+    """Fuseau de l'APPAREIL de l'utilisateur, s'il diffère du fuseau affiché.
+
+    [F1-voyage] Le fuseau système du SERVEUR ne doit jamais décider de
+    l'affichage (c'est le bug d'origine : le conteneur Cloud affichait UTC).
+    Mais celui du NAVIGATEUR de l'utilisateur, lui, est une information
+    légitime : quand le propriétaire se déplace, Streamlit l'expose via
+    ``st.context.timezone``. On ne l'applique PAS d'office — un changement
+    d'heure silencieux serait pire qu'un défaut stable — on le PROPOSE.
+
+    Retourne ``None`` si l'information est absente, invalide, ou identique.
+    """
+    try:
+        raw = getattr(st.context, "timezone", None)
+    except Exception:                                          # noqa: BLE001
+        return None
+    if not raw:
+        return None
+    return _valid_tz_key(str(raw))
 
 
 def _valid_tz_key(token: Optional[str]) -> Optional[str]:
@@ -867,16 +935,44 @@ def render_sidebar(events: List[dict]) -> Filters:
         # [2.3] Le fuseau d'affichage est un choix de VUE. Le backend reste en
         # UTC ; l'artefact sur disque n'est jamais modifié. Le défaut vient de
         # BLUESTAR_DISPLAY_TZ, sinon Africa/Casablanca — jamais du système.
-        default_tz, tz_origin = resolve_view_tz()
-        options = list(VIEW_TZ_LABELS)
-        if default_tz not in options:
-            options.insert(0, default_tz)
-        tz_choice = st.selectbox(
-            "Fuseau d'affichage", options,
-            index=options.index(default_tz),
-            help=f"Affichage uniquement (origine : {tz_origin}). "
-                 "Le fichier JSON reste en UTC.")
+        # [F1-voyage] La liste couvre la base IANA complete (599 zones) : en
+        # voyage, n'importe quelle ville reste atteignable. Les destinations
+        # courantes sont en tete ; ``st.selectbox`` filtre a la frappe.
+        # L'étiquette porte l'offset RÉEL (« Asia/Singapore — UTC+8 »), donc
+        # elle reste juste en heure d'été comme en heure d'hiver, et le nom
+        # seul ne laisse pas deviner l'heure qu'il est.
+        chosen = st.session_state.get("_view_tz")
+        default_tz, tz_origin = resolve_view_tz(chosen)
+        all_tzs = available_view_tzs()
+        if default_tz not in all_tzs:
+            all_tzs.insert(0, default_tz)
+        labels = {tz: tz_display_label(tz) for tz in all_tzs}
+        label_list = [labels[tz] for tz in all_tzs]
+        label_to_tz = {labels[tz]: tz for tz in all_tzs}
+
+        # [BUG] Sans ``key``, Streamlit ne peut pas rattacher le widget a son
+        # etat d'un rerun a l'autre : le selectbox repartait de ``index=`` a
+        # CHAQUE passage, et le choix de l'utilisateur etait silencieusement
+        # ramene a Casablanca. Le selecteur semblait fonctionner (on pouvait
+        # cliquer) mais ne changeait jamais l'affichage. La cle est desormais
+        # stable et le widget est la SEULE source de verite de son etat.
+        picked = st.selectbox(
+            "Fuseau d'affichage",
+            label_list,
+            index=label_list.index(labels[default_tz]),
+            key="_tz_select",
+            help="Affichage uniquement — le fichier JSON reste en UTC. "
+                 f"Tapez pour filtrer parmi {len(all_tzs)} fuseaux "
+                 f"(origine : {tz_origin}).")
+        tz_choice = label_to_tz.get(picked, default_tz)
         st.session_state["_view_tz"] = tz_choice
+        # auto-détection du voyage : proposée, jamais imposée silencieusement
+        suggested = _suggested_view_tz()
+        if suggested and suggested != tz_choice and st.button(
+                f"Utiliser le fuseau de cet appareil ({tz_display_label(suggested)})",
+                key="_tz_suggest", width="stretch"):
+            st.session_state["_view_tz"] = suggested
+            st.rerun()
 
         st.markdown("")
         if st.button("Relancer l'ingestion", type="primary", width="stretch"):
