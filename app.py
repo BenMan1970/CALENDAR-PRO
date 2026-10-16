@@ -15,6 +15,34 @@ Doctrine :
 """
 from __future__ import annotations
 
+# [INCIDENT-ANALYTICS] DOIT PRECEDER `import streamlit`.
+#
+# Reproduit : si `pandas` est present dans ``sys.modules`` mais pas encore
+# initialise, ``_plotly_utils`` le recupere via ``sys.modules.get`` et fait
+# ``pd.Series`` sur un objet truthy sans attributs -> AttributeError. Le crash
+# ne vient donc PAS de notre code : il frappe dans
+# ``streamlit/elements/lib/streamlit_plotly_theme.py``, DES l'import de
+# Streamlit, avant que quoi que ce soit d'autre puisse se defendre.
+#
+# La seule parade possible est donc d'initialiser pandas COMPLETEMENT en tout
+# premier. Un module entier ne peut plus pieger le validateur.
+#
+# ATTENTION, piege verifie : un simple ``import pandas`` NE SUFFIT PAS. Python
+# voit l'entree deja presente dans ``sys.modules`` et la renvoie telle quelle,
+# toujours cassee (mesure : ``hasattr(pandas, 'Series') == False``). Il faut
+# forcer la REEXECUTION du module avec ``importlib.reload`` — c'est ce qui
+# repose les attributs. Mesure apres reload : ``Series`` present.
+#
+# (Le meme garde existe dans ui.py, par robustesse si ui est importe seul.)
+try:                                                         # noqa: SIM105
+    import importlib as _importlib
+    import pandas as _pd
+    if not hasattr(_pd, "Series"):                            # module tronque
+        _importlib.reload(_pd)
+    del _pd, _importlib
+except Exception:                                            # noqa: BLE001
+    pass
+
 import json
 import os
 import threading
@@ -1151,22 +1179,35 @@ def render_analytics(events: List[dict]) -> None:
         U.render(U.empty("Rien à visualiser", "Aucun événement sur le périmètre courant."))
         return
 
+    # [INCIDENT-ANALYTICS] Les constructeurs passent par U._safe_chart : un
+    # echec de plotly (cf. le piege pandas reproduit dans ui.py) rend None au
+    # lieu de propager un AttributeError qui tuait tout l'onglet. L'appelant
+    # testait deja ``if fig:``, le contrat est donc inchange.
     c1, c2, c3 = st.columns([1.45, 1, 1])
     with c1, st.container(border=True):
         U.panel_title("Densité par jour", "volume · impact")
-        fig = U.density_by_day(events)
+        fig = U._safe_chart(U.density_by_day, events)
         if fig:
             st.plotly_chart(fig, config=U.PLOTLY_CONFIG, width="stretch")
+        else:
+            U.render(U.empty("Graphique indisponible",
+                             "Le détail est disponible dans les diagnostics."))
     with c2, st.container(border=True):
         U.panel_title("Répartition d'impact", "mix")
-        fig = U.impact_donut(events)
+        fig = U._safe_chart(U.impact_donut, events)
         if fig:
             st.plotly_chart(fig, config=U.PLOTLY_CONFIG, width="stretch")
+        else:
+            U.render(U.empty("Graphique indisponible",
+                             "Le détail est disponible dans les diagnostics."))
     with c3, st.container(border=True):
         U.panel_title("Charge par devise", "top 9")
-        fig = U.currency_exposure(events)
+        fig = U._safe_chart(U.currency_exposure, events)
         if fig:
             st.plotly_chart(fig, config=U.PLOTLY_CONFIG, width="stretch")
+        else:
+            U.render(U.empty("Graphique indisponible",
+                             "Le détail est disponible dans les diagnostics."))
 
 
 

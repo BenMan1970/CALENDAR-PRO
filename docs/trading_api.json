@@ -41,14 +41,38 @@
   },
   "trading_export": {
     "generator": "trading_export.py",
+    "schema_version": "trading-export-1.0.0",
+    "refusal_policy": "L'export echoue (code retour non nul) si l'artefact est INVALID (rc=2), sans horodatage (rc=2), absent (rc=1) ou plus vieux que BLUESTAR_TRADING_MAX_AGE_S (defaut 3600 s, rc=3) sauf --allow-stale.",
     "fields": {
-      "generated_at_utc": "Horodatage commun aux artefacts du cycle (detecte un couple incoherent)",
-      "fetched_at_utc": "Horodatage du fetch source",
-      "artifact_age_s": "Age reel de l'artefact en secondes",
-      "quality_status": "VALID / DEGRADED / INVALID",
-      "is_stale": "Recalcule a l'export, jamais lu tel quel",
-      "pairs_with_currency_exposure": "CONTEXTE uniquement - n'est PAS un signal directionnel (voir pairs_semantics)"
+      "schema_version": "Version du CONTRAT de ce document. A refuser si inconnue.",
+      "exported_at_utc": "Instant UTC de PRODUCTION du document (distinct du fetch).",
+      "generated_at_utc": "Instant du cycle d'ingestion ; commun aux artefacts freres.",
+      "fetched_at_utc": "Instant ou NOUS avons recupere la charge utile (pas le Last-Modified de l'editeur).",
+      "artifact_age_s": "Age reel de l'artefact source, en secondes.",
+      "quality_status": "VALID / DEGRADED / INVALID.",
+      "is_stale": "RECALCULE a l'export, jamais lu tel quel.",
+      "content_hash": "Hash de projection economique — parite inter-apps.",
+      "parity_hash": "Hash de parite sur le perimetre du contrat (HIGH+MEDIUM).",
+      "source": "Fournisseur declare.",
+      "source_url": "URL REELLEMENT servie (resolved_url, sinon url).",
+      "total_events": "Nombre d'evenements dans l'artefact source.",
+      "upcoming_events": "Nombre d'evenements a venir au moment de l'export.",
+      "events": "Liste des evenements a venir, triee chronologiquement."
     },
-    "refusal_policy": "L'export echoue (code retour non nul) si l'artefact est INVALID, sans horodatage, ou plus vieux que BLUESTAR_TRADING_MAX_AGE_S (defaut 3600 s) sauf --allow-stale."
+    "event_fields": {
+      "id": "occurrence_id stable de l'evenement.",
+      "currency": "Devise (USD, EUR, GBP, JPY, ...).",
+      "name": "Intitule de l'evenement.",
+      "impact": "HIGH ou MEDIUM (perimetre de la politique).",
+      "datetime_utc": "Instant UTC de publication.",
+      "datetime_display": "Meme instant, rendu dans le fuseau d'affichage de l'artefact.",
+      "hours_until": "Heures restantes (recalcule a l'export).",
+      "forecast": "Prevision (raw). null si la source ne publie rien.",
+      "previous": "Valeur precedente (raw). null si absente.",
+      "actual": "TOUJOURS null : la source ne publie pas de valeur realisee.",
+      "actual_status": "UNSUPPORTED_BY_SOURCE — jamais un tiret ambigu.",
+      "pairs_with_currency_exposure": "CONTEXTE uniquement — PAS un signal directionnel.",
+      "pairs_semantics": "Vaut 'context_only_not_a_signal' : garde-fou explicite."
+    }
   }
 }

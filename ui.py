@@ -19,11 +19,16 @@ composants HTML et charts Plotly.
 """
 from __future__ import annotations
 
+import logging
 from collections import Counter, OrderedDict
 from html import escape
 from typing import Any, Iterable, Optional, Sequence
 
 import streamlit as st
+
+# [INCIDENT-ANALYTICS] Un graphique qui echoue doit se voir dans les logs,
+# jamais dans la page : cf. `_safe_chart`.
+logger = logging.getLogger(__name__)
 
 # ── Tokens ───────────────────────────────────────────────────────────────────
 BG = "#030712"
@@ -515,6 +520,36 @@ def panel_title(title: str, hint: str = "") -> None:
 
 
 # ── Charts Plotly ────────────────────────────────────────────────────────────
+# [INCIDENT-ANALYTICS] AttributeError "module 'pandas' has no attribute
+# 'Series'" leve DANS plotly, sur l'onglet Analytique.
+#
+# Cause racine, reproduite : ``_plotly_utils.optional_imports.get_module``
+# fait ``sys.modules.get(name)`` quand ``should_load=False``. Si ``pandas``
+# est present dans ``sys.modules`` mais EN COURS d'initialisation (import
+# circulaire : streamlit -> pandas -> ...), l'objet renvoye est truthy mais
+# ses attributs ne sont pas encore poses. ``basevalidators.py`` execute alors
+# ``pd and isinstance(v, (pd.Series, pd.Index))`` et leve un AttributeError.
+#
+# Le declencheur est un ``hovertemplate`` : une CHAINE, donc ``array_ok`` est
+# vrai et le validateur appelle ``is_array`` -> ``is_homogeneous_array`` ->
+# le crash. Tous nos graphiques passent un hovertemplate : d'ou un onglet
+# Analytique mort, alors que le reste de l'app fonctionne.
+#
+# Parade : on force l'import COMPLET de pandas AVANT plotly. Un module
+# integralement initialise ne peut plus pieger le validateur. Si l'import
+# echoue, on n'insiste pas (plotly sait vivre sans pandas).
+# ATTENTION, piege verifie : un simple ``import pandas`` NE SUFFIT PAS. Python
+# renvoie l'entree deja presente dans ``sys.modules`` sans la reevaluer, donc
+# toujours cassee. Il faut forcer la REEXECUTION avec ``importlib.reload``.
+try:                                                         # noqa: SIM105
+    import importlib as _importlib
+    import pandas as _pd
+    if not hasattr(_pd, "Series"):                            # module tronque
+        _importlib.reload(_pd)
+    del _pd, _importlib
+except Exception:                                            # noqa: BLE001
+    pass
+
 try:
     import plotly.graph_objects as go
     AVAILABLE = True
@@ -526,6 +561,27 @@ PLOTLY_CONFIG = {"displayModeBar": False, "staticPlot": False, "displaylogo": Fa
                  "scrollZoom": False, "doubleClick": False}
 
 _IMPACT_ORDER = ("HIGH", "MEDIUM", "LOW", "HOLIDAY", "UNKNOWN")
+
+# [INCIDENT-ANALYTICS] Un graphique est un ORNEMENT : il ne doit jamais faire
+# tomber la page. Or les constructeurs plotly valident chaque propriete et
+# peuvent lever sur des causes hors de notre controle (cf. la note pandas
+# ci-dessus, reproduite : AttributeError dans _plotly_utils). L'appelant
+# teste deja ``if fig:`` : il suffit de rendre None en cas d'echec pour que
+# l'onglet affiche les KPI et le reste, au lieu d'un traceback.
+#
+# On LOGGE l'erreur : degrader en silence rendrait le prochain incident
+# invisible, ce qui est precisement ce qu'on cherche a eviter.
+_CHART_ERRORS: list = []
+
+
+def _safe_chart(builder, *args, **kwargs):
+    """Construit une figure ; retourne None en cas d'echec, jamais d'exception."""
+    try:
+        return builder(*args, **kwargs)
+    except Exception as exc:                                 # noqa: BLE001
+        _CHART_ERRORS.append(f"{builder.__name__}: {type(exc).__name__}: {exc}")
+        logger.exception("Construction du graphique %s impossible", builder.__name__)
+        return None
 
 
 def _layout(height: int, *, ygrid: bool = True, xgrid: bool = False) -> dict:
